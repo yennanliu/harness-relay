@@ -71,7 +71,7 @@ describe('an agent asks for a folder', () => {
     await finish(conv.id);
 
     const [copy] = conv.settings.copies!;
-    expect(copy).toMatchObject({ of: other, root: other, branch: `relay/${conv.id.slice(0, 8)}/other-${n}` });
+    expect(copy).toMatchObject({ of: other, root: other, branch: `relay/${conv.id.slice(0, 8)}-copy/other-${n}` });
     expect(copy!.path.startsWith(join(root, 'data', 'worktrees', conv.id, 'copy-'))).toBe(true);
     expect(conv.settings).toMatchObject({ permission: 'edit', cwd: project, extraCwds: [copy!.path] });
     expect(folderPart(conv)).toMatchObject({ status: 'allowed', copy: copy!.path, branch: copy!.branch });
@@ -288,6 +288,64 @@ describe('an agent asks for a folder', () => {
     await orchestrator.retainCopies(conv, next);
     expect(next.copies).toEqual([copy]);
     expect(existsSync(copy!.tree)).toBe(true);
+  });
+
+  it('in parallel mode keeps the copy\'s branch apart from the agents\' own, and commits what is applied to the copy', async () => {
+    // A repository in a folder called as an agent is: their branches must not be one.
+    const other = join(root, `named-${n}`, 'Alice');
+    mkdirSync(other, { recursive: true });
+    writeFileSync(join(other, 'README.md'), 'other repository\n');
+    git(other, 'init', '-q');
+    git(other, 'add', '-A');
+    git(other, 'commit', '-q', '-m', 'first');
+    const conv = conversation({ mode: 'parallel', permission: 'read-only' });
+    fake.folderAsk = { Alice: `[ASK_FOLDER ${other} edit]` };
+    await orchestrator.send(conv.id, 'go');
+    await finish(conv.id);
+    await orchestrator.answerFolder(conv.id, asking(conv).id, { allow: true });
+    await finish(conv.id);
+    const [copy] = conv.settings.copies!;
+    expect(copy!.branch).toBe(`relay/${conv.id.slice(0, 8)}-copy/Alice`);
+    // The run went through (no branch of the copy was taken or reset), each agent in a worktree of the copy.
+    expect(agentMessages(conv).at(-1)!.status).toBe('done');
+    const mine = conv.worktrees.a!.find((w) => w.root === copy!.tree)!;
+    expect(mine.branch).toBe(`relay/${conv.id.slice(0, 8)}/Alice`);
+    expect(git(other, 'log', '--format=%s', copy!.branch)).toBe('first');
+    // Nothing reached the copy yet: the agents wrote in their own worktrees.
+    expect(existsSync(join(copy!.path, 'Alice.txt'))).toBe(false);
+
+    await orchestrator.applyAgentWork(conv.id, 'a');
+    expect(existsSync(join(copy!.path, 'Alice.txt'))).toBe(true);
+    expect(git(other, 'show', `${copy!.branch}:Alice.txt`)).toBe('Alice was here');
+    expect(git(other, 'log', '--format=%s', copy!.branch).split('\n')).toEqual(['Harness Relay: test', 'first']);
+    expect(existsSync(join(other, 'Alice.txt'))).toBe(false);
+  });
+
+  it('commits what is in a copy and not on its branch yet before removing it', async () => {
+    const other = otherRepo();
+    const conv = conversation({ mode: 'roundtable', permission: 'read-only' });
+    fake.folderAsk = { Alice: `[ASK_FOLDER ${other} edit]` };
+    await orchestrator.send(conv.id, 'go');
+    await finish(conv.id);
+    await orchestrator.answerFolder(conv.id, asking(conv).id, { allow: true });
+    await finish(conv.id);
+    const [copy] = conv.settings.copies!;
+    writeFileSync(join(copy!.path, 'late.txt'), 'late\n');
+    await orchestrator.deleteConversation(conv.id);
+    expect(existsSync(copy!.tree)).toBe(false);
+    expect(git(other, 'show', `${copy!.branch}:late.txt`)).toBe('late');
+  });
+
+  it('shows the card of a reply that is nothing but the request', async () => {
+    const other = otherRepo();
+    const conv = conversation({ mode: 'roundtable', permission: 'read-only' });
+    fake.folderAsk = { Alice: `only:[ASK_FOLDER ${other}]` };
+    await orchestrator.send(conv.id, 'go');
+    await finish(conv.id);
+    const [alice] = agentMessages(conv);
+    // Not a pass (the chat draws a passed reply as one line, without its parts): it asks.
+    expect(alice).toMatchObject({ asked: true, passed: false, parts: [{ type: 'folder', path: other, status: 'pending' }] });
+    expect(conv.pause?.askers).toEqual(['a']);
   });
 
   it('tells every agent below full access how to ask', async () => {

@@ -517,13 +517,13 @@ Cursor 和 Grok 不同，任何一類都沒有開關，連它從其他 CLI 的�
 
 `POST /api/conversations/:id/messages/:messageId/folder` 用來回答（`Orchestrator.answerFolder()`），期間對話會像修改設定時一樣被保留，而且只有在團隊還在等那個 agent 時才能回答（使用者若已改用文字回覆，就算回答過了：404）。
 
-- **允許**（`allowFolder()`）：先檢查完所有條件才動手。資料夾必須存在（404）、位於 git repository 內（不會替它建立）、repository 不能以家目錄或檔案系統根目錄為根，而且至少要有一個 commit；工作目錄不能超過 `MAX_CWDS`。接著 Harness Relay 建立一份**副本**：該 repository 的 git worktree，位於 `data/worktrees/<對話>/copy-<root 的 8 位 hex>`，使用新分支 `relay/<對話前 8 碼>/<資料夾名稱>`（repository 已有同名分支時加上 `-2`、`-3`…），從 repository 的最後一個 commit（`HEAD`，不是 snapshot：使用者尚未提交的修改不會出現在他可能發佈的分支上）開始。所要求的資料夾在副本裡的對應位置會加入工作目錄（`ConversationSettings.copies`，每個是一個 `CwdCopy`：`path`、`of`、`root`、`tree`、`branch`；欄位 `cwd_copies`）。同一個 repository 在一個對話裡只有一份副本：它的另一個資料夾就是同一個 worktree 裡的資料夾。
+- **允許**（`allowFolder()`）：先檢查完所有條件才動手。資料夾必須存在（404）、位於 git repository 內（不會替它建立）、repository 不能以家目錄或檔案系統根目錄為根，而且至少要有一個 commit；工作目錄不能超過 `MAX_CWDS`。接著 Harness Relay 建立一份**副本**：該 repository 的 git worktree，位於 `data/worktrees/<對話>/copy-<root 的 8 位 hex>`，使用新分支 `relay/<對話前 8 碼>-copy/<資料夾名稱>`（與平行模式下 agent 的分支 `relay/<對話>/<agent>` 分開的命名空間）（repository 已有同名分支時加上 `-2`、`-3`…），從 repository 的最後一個 commit（`HEAD`，不是 snapshot：使用者尚未提交的修改不會出現在他可能發佈的分支上）開始。所要求的資料夾在副本裡的對應位置會加入工作目錄（`ConversationSettings.copies`，每個是一個 `CwdCopy`：`path`、`of`、`root`、`tree`、`branch`；欄位 `cwd_copies`）。同一個 repository 在一個對話裡只有一份副本：它的另一個資料夾就是同一個 worktree 裡的資料夾。
 - **權限**：要求了編輯而對話是唯讀時，權限會改成可編輯，而且適用於所有工作目錄（卡片會列出是哪些）。此時「可編輯」不接受的工作目錄（`relayFolderRefusal()`：例如 Harness Relay 自己的資料夾，也就是從它的 checkout 啟動的伺服器的預設工作目錄）會離開對話；如果要求的就是某個工作目錄，副本會取代它的位置（part 的 `drops`，顯示在卡片上）。
 - **拒絕**：什麼都不變。
 
 不論哪一種，答案都會以使用者的回覆貼出（`i18n.ts` 的 `folderAllowed`、`folderAllowedEdit`、`folderDenied`，並附上使用者的說明），所以提出要求的 agent 先回答，團隊再從停下的地方繼續（`takePause()`）。briefing 會列出每份副本、它是什麼的副本與它的分支（`prompt.ts` 的 `copyRules()`）：在副本裡工作、不要更動原本的資料夾，而且被 git 忽略的檔案（相依套件、`.env`）不在裡面。
 
-副本和其他工作目錄一樣（每一輪前後的 snapshot、目錄鎖、平行模式下每個 agent 各有一個 worktree）。每次執行結束、放開目錄鎖之前，Harness Relay 會把每份副本裡的變更提交到它的分支（`commitCopies()`，`workspace.ts` 的 `commitCopy()`：使用使用者自己的 git 身分，沒有設定時才用 Harness Relay 的；訊息是 `Harness Relay: <對話標題>`），並在對話裡用一則備註寫出分支名稱。repository 自己的 checkout、index 與分支都不會被更動：成果是一個分支，由使用者決定是否發佈。副本的 worktree 會隨對話刪除，或在使用者把它的資料夾從工作目錄移除時刪除（`retainCopies()`）；分支會保留。從這個對話分支出去的對話，或排程開啟的新對話，仍把副本當成工作目錄，但並不擁有它（只有 `data/worktrees/` 下的資料夾裡放著它的那個對話會刪除它）。
+副本和其他工作目錄一樣（每一輪前後的 snapshot、目錄鎖、平行模式下每個 agent 各有一個 worktree）。每次執行結束、放開目錄鎖之前，Harness Relay 會把每份副本裡的變更提交到它的分支（套用某位 agent 的 worktree 成果時也會，平行模式下副本只在這時改變；移除副本之前也會，所以移除不會遺失工作）（`commitCopies()`，`workspace.ts` 的 `commitCopy()`：使用使用者自己的 git 身分，沒有設定時才用 Harness Relay 的；訊息是 `Harness Relay: <對話標題>`），並在對話裡用一則備註寫出分支名稱。repository 自己的 checkout、index 與分支都不會被更動：成果是一個分支，由使用者決定是否發佈。副本的 worktree 會隨對話刪除，或在使用者把它的資料夾從工作目錄移除時刪除（`retainCopies()`）；分支會保留。從這個對話分支出去的對話，或排程開啟的新對話，仍把副本當成工作目錄，但並不擁有它（只有 `data/worktrees/` 下的資料夾裡放著它的那個對話會刪除它）。
 
 ## 瀏覽檔案
 

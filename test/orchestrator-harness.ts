@@ -260,7 +260,8 @@ beforeAll(() => {
       const folderAsk = fake.folderAsk[name];
       if (folderAsk) {
         delete fake.folderAsk[name];
-        o.onEvent({ type: 'text', text: `${name} needs another repository.\n\n${folderAsk}` });
+        // `only:` before the marker: a reply that says nothing else.
+        o.onEvent({ type: 'text', text: folderAsk.startsWith('only:') ? folderAsk.slice(5) : `${name} needs another repository.\n\n${folderAsk}` });
         o.onEvent({ type: 'text_end' });
         return { sessionId: `session-${name}` };
       }

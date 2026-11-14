@@ -1452,8 +1452,11 @@ export class Orchestrator {
     const tree = sibling ? sibling.tree : join(DATA_DIR, 'worktrees', conv.id, `copy-${createHash('sha256').update(root).digest('hex').slice(0, 8)}`);
     const path = within ? dir : worktreeDir(root, dir, tree);
     const had = copies.find((c) => sameFolder(c.path, path));
-    // A branch of its own: never one the repository has (an agent's of that name in parallel mode, say).
-    const name = `relay/${conv.id.slice(0, 8)}/${branchSlug(basename(root))}`;
+    // A branch of its own, never one the repository has. In a namespace of its own too, beside the one
+    // of the agents' branches in parallel mode (`relay/<conversation>/<agent>`, made in this repository
+    // as well, with `-B`): a folder called as an agent is (in any letter case, on a file system that
+    // ignores it) would otherwise share its branch.
+    const name = `relay/${conv.id.slice(0, 8)}-copy/${branchSlug(basename(root))}`;
     let branch = sibling?.branch ?? name;
     if (!sibling) for (let n = 2; await branchExists(root, branch); n++) branch = `${name}-${n}`;
     const copy: CwdCopy = had ?? { path, of: within ? within.of : dir, root, tree, branch };
@@ -1496,6 +1499,7 @@ export class Orchestrator {
     if (kept.length) next.copies = kept;
     else delete next.copies;
     const gone = this.ownCopies(conv, copies).filter((c) => !kept.some((k) => k.tree === c.tree));
+    await this.commitLeft(conv, gone);
     for (const tree of new Set(gone.map((c) => c.tree))) {
       await removeWorktree(gone.find((c) => c.tree === tree)!.root, tree).catch((err) =>
         console.warn('[orchestrator] copy cleanup failed:', (err as Error).message),
@@ -1504,7 +1508,21 @@ export class Orchestrator {
   }
 
   /**
-   * Commit what changed in the conversation's copies to their branches (when a run ends): the result
+   * Before copies are removed: what is in them and not on their branches yet (a run that was stopped
+   * before its end, files the user changed there) is committed, so removing a copy never loses work.
+   */
+  private async commitLeft(conv: Conversation, copies: readonly CwdCopy[]): Promise<void> {
+    for (const tree of new Set(copies.map((c) => c.tree))) {
+      if (!existsSync(tree)) continue;
+      await commitCopy(tree, `Harness Relay: ${conv.title}`).catch((err) =>
+        console.warn('[orchestrator] could not commit a copy before removing it:', (err as Error).message),
+      );
+    }
+  }
+
+  /**
+   * Commit what changed in the conversation's copies to their branches (when a run ends, and when an
+   * agent's work is applied): the result
    * of the agents' work is a branch of the repository they asked for, which the user pushes.
    */
   private async commitCopies(conv: Conversation): Promise<void> {
@@ -1704,6 +1722,9 @@ export class Orchestrator {
         resetAll();
         const name = conv.agents.find((a) => a.id === agentId)?.name ?? agentId;
         this.systemNote(conv, t().appliedNote(name, files.length));
+        // Applied into a copy of a repository an agent asked for: onto its branch, as at a run's end
+        // (in parallel mode the copies change only here).
+        await this.commitCopies(conv);
         this.emitConversation(conv);
         return files;
       } finally {
@@ -2071,6 +2092,7 @@ export class Orchestrator {
     // The copies of repositories agents asked for: their worktrees go, their branches stay (the
     // user's results). After the agents' worktrees above, which may be worktrees of a copy.
     const copies = this.ownCopies(conv, conv.settings.copies ?? []);
+    await this.commitLeft(conv, copies);
     for (const tree of new Set(copies.map((c) => c.tree))) {
       await removeWorktree(copies.find((c) => c.tree === tree)!.root, tree).catch((err) =>
         console.warn('[orchestrator] copy cleanup failed:', (err as Error).message),
@@ -2655,7 +2677,8 @@ export class Orchestrator {
         msg.asked = true;
       }
       const text = textOf(msg);
-      msg.passed = isPass(text) || (!text && !msg.parts.some((p) => p.type === 'tool'));
+      // A reply that only asks for a folder said nothing else, but it did not pass: its card shows.
+      msg.passed = !folder && (isPass(text) || (!text && !msg.parts.some((p) => p.type === 'tool')));
       msg.status = 'done';
       msg.meta = {
         ...msg.meta,
