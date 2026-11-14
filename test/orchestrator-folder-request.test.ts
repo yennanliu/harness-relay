@@ -309,7 +309,7 @@ describe('an agent asks for a folder', () => {
     // The run went through (no branch of the copy was taken or reset), each agent in a worktree of the copy.
     expect(agentMessages(conv).at(-1)!.status).toBe('done');
     const mine = conv.worktrees.a!.find((w) => w.root === copy!.tree)!;
-    expect(mine.branch).toBe(`relay/${conv.id.slice(0, 8)}/Alice`);
+    expect(mine.branch).toBe(`relay/${conv.id.slice(0, 8)}-on-copy/Alice`);
     expect(git(other, 'log', '--format=%s', copy!.branch)).toBe('first');
     // Nothing reached the copy yet: the agents wrote in their own worktrees.
     expect(existsSync(join(copy!.path, 'Alice.txt'))).toBe(false);
@@ -351,7 +351,7 @@ describe('an agent asks for a folder', () => {
     expect(systemNotes(conv).some((t) => t.includes('cannot force update'))).toBe(false);
     await orchestrator.deleteConversation(conv.id);
     expect(git(other, 'worktree', 'list').split('\n')).toHaveLength(1);
-    expect(git(other, 'branch', '--list', `relay/${conv.id.slice(0, 8)}/*`)).toBe('');
+    expect(git(other, 'branch', '--list', `relay/${conv.id.slice(0, 8)}-on-copy/*`)).toBe('');
   });
 
   // Making a link needs a privilege on Windows.
@@ -363,6 +363,46 @@ describe('an agent asks for a folder', () => {
     await orchestrator.send(conv.id, 'go');
     await finish(conv.id);
     expect(folderPart(conv)).toMatchObject({ path: other });
+  });
+
+  it('in parallel mode works in a copy of the repository a working directory is in too', async () => {
+    // One repository, two folders: the chat is in one, an agent asks for the other.
+    const mono = join(root, `mono-${n}`);
+    for (const pkg of ['a', 'b']) {
+      mkdirSync(join(mono, 'packages', pkg), { recursive: true });
+      writeFileSync(join(mono, 'packages', pkg, 'index.txt'), `${pkg}\n`);
+    }
+    git(mono, 'init', '-q');
+    git(mono, 'add', '-A');
+    git(mono, 'commit', '-q', '-m', 'first');
+    const here = join(mono, 'packages', 'a');
+    const there = join(mono, 'packages', 'b');
+    const conv = conversation({ mode: 'parallel', permission: 'edit', cwd: here });
+    fake.folderAsk = { Alice: `[ASK_FOLDER ${there}]` };
+    await orchestrator.send(conv.id, 'go');
+    await finish(conv.id);
+    calls.length = 0;
+    await orchestrator.answerFolder(conv.id, asking(conv).id, { allow: true });
+    await finish(conv.id);
+    const [copy] = conv.settings.copies!;
+    expect(conv.settings).toMatchObject({ cwd: here, extraCwds: [join(copy!.tree, 'packages', 'b')] });
+    // Each agent has a worktree of the repository and one of the copy, on branches of their own.
+    expect(systemNotes(conv).some((t) => t.includes('fatal'))).toBe(false);
+    // Bob answered in the round Alice asked in: she alone answers now.
+    expect(calls.map((c) => c.name)).toEqual(['Alice']);
+    expect(agentMessages(conv).at(-1)).toMatchObject({ status: 'done' });
+    expect(conv.worktrees.a!.map((w) => w.branch).sort()).toEqual([`relay/${conv.id.slice(0, 8)}-on-copy/Alice`, `relay/${conv.id.slice(0, 8)}/Alice`]);
+    expect(calls[0]!.systemPrompt).toContain('branches have "-on-copy" after the chat\'s id');
+    // And the next run too.
+    calls.length = 0;
+    await orchestrator.send(conv.id, 'again');
+    await finish(conv.id);
+    expect(calls.map((c) => c.name).sort()).toEqual(['Alice', 'Bob']);
+    expect(agentMessages(conv).slice(-2).map((m) => m.status)).toEqual(['done', 'done']);
+    expect(systemNotes(conv).some((t) => t.includes('fatal'))).toBe(false);
+    await orchestrator.deleteConversation(conv.id);
+    expect(git(mono, 'worktree', 'list').split('\n')).toHaveLength(1);
+    expect(git(mono, 'branch', '--format=%(refname:short)').split('\n').sort()).toEqual([git(mono, 'rev-parse', '--abbrev-ref', 'HEAD'), copy!.branch].sort());
   });
 
   it('commits what is in a copy and not on its branch yet before removing it', async () => {

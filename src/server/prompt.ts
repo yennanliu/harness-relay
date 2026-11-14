@@ -102,14 +102,18 @@ ${access}
  * The working directories that are copies of repositories the agents asked for ('' when none): what
  * each is a copy of, and that the work goes into the copy.
  */
-function copyRules(conv: Conversation): string {
+function copyRules(conv: Conversation, ws: BriefingWorkspace): string {
   const copies = conv.settings.copies ?? [];
   if (!copies.length) return '';
   const list = copies.map((c) => `  - ${c.path} is a copy of ${c.of} (branch ${c.branch} of the repository ${c.root})`).join('\n');
   return `
 - Some working directories are copies of the user's repositories, made when an agent asked for them: each is a git worktree on a branch of its own.
 ${list}
-  Do the work in the copy and leave the original folder as it is. A copy starts from the repository's last commit, so what git ignores there (installed dependencies, .env files, build output) is missing: install or build in the copy when you need it. Harness Relay commits what changed in a copy to its branch when the team's run ends; do not commit, switch branches, push or open a pull request yourself unless the user asks for it.`;
+  Do the work in the copy and leave the original folder as it is. A copy starts from the repository's last commit, so what git ignores there (installed dependencies, .env files, build output) is missing: install or build in the copy when you need it. Harness Relay commits what changed in a copy to its branch when the team's run ends; do not commit, switch branches, push or open a pull request yourself unless the user asks for it.${
+    ws.kind === 'isolated'
+      ? ' In a copy\'s repository your own and your teammates\' branches have "-on-copy" after the chat\'s id (relay/<id>-on-copy/<Name>, not relay/<id>/<Name>).'
+      : ''
+  }`;
 }
 
 /**
@@ -227,7 +231,7 @@ ${team}
 - To hand the user a file you made (a PDF, slides, a document, a spreadsheet, an archive…), save it inside your working directory and link it with a path relative to that directory, e.g. \`[Q3 report](out/report.pdf)\`, or \`[Deck](<out/Q3 deck.pptx>)\` when the path has spaces. The user downloads it from that link, on this computer or another device; only files inside your working directory can be downloaded.
 
 # Workspace
-${workspaceRules(conv, ws)}${copyRules(conv)}${toolSections(tools, !nativeOff.includes('skills'), canReadFiles(agent.provider, nativeOff, nativeItems))}`;
+${workspaceRules(conv, ws)}${copyRules(conv, ws)}${toolSections(tools, !nativeOff.includes('skills'), canReadFiles(agent.provider, nativeOff, nativeItems))}`;
 }
 
 /**

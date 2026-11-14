@@ -1653,6 +1653,10 @@ export class Orchestrator {
    */
   private async prepareWorktrees(conv: Conversation, agents: AgentConfig[], roots: string[]): Promise<void> {
     const bases = new Map<string, string>();
+    // A copy is a second root in its repository: where a working directory of that repository stays
+    // too, an agent has a worktree of each there, and one branch cannot be checked out in both. So
+    // an agent's branch in a copy has a namespace of its own (beside the copies' own, `-copy`).
+    const copyTrees = new Set((conv.settings.copies ?? []).map((c) => realOr(c.tree)));
     for (const a of agents) {
       const had = conv.worktrees[a.id] ?? [];
       for (const gone of had.filter((w) => !roots.includes(w.root))) {
@@ -1675,7 +1679,7 @@ export class Orchestrator {
           root,
           // A folder of its own for each repository (an earlier one, of the agent's id alone, is kept).
           path: cur ? cur.path : join(DATA_DIR, 'worktrees', conv.id, `${a.id}-${createHash('sha256').update(root).digest('hex').slice(0, 8)}`),
-          branch: cur ? cur.branch : `relay/${conv.id.slice(0, 8)}/${a.name}`,
+          branch: cur ? cur.branch : `relay/${conv.id.slice(0, 8)}${copyTrees.has(root) ? '-on-copy' : ''}/${a.name}`,
           base,
           needsReset: false,
         };
