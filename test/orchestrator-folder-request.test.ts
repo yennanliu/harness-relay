@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import type { Conversation, MessagePart } from '../src/shared/types';
+import { cwdsOf, type Conversation, type MessagePart } from '../src/shared/types';
 import { Store, agentMessages, agents, calls, conversation, db, fake, finish, n, orchestrator, project, root, store, textOf } from './orchestrator-harness';
 
 type FolderPart = Extract<MessagePart, { type: 'folder' }>;
@@ -207,6 +207,23 @@ describe('an agent asks for a folder', () => {
     }
     // No repository was made where there was none.
     expect(existsSync(join(plain, '.git'))).toBe(false);
+  });
+
+  it('refuses a copy that would take the working directories over the limit', async () => {
+    const other = otherRepo();
+    const extra = Array.from({ length: 7 }, (_, i) => {
+      const dir = join(root, `extra-${n}-${i}`);
+      mkdirSync(dir, { recursive: true });
+      return dir;
+    });
+    const conv = conversation({ mode: 'roundtable', permission: 'read-only', extraCwds: extra });
+    fake.folderAsk = { Alice: `[ASK_FOLDER ${other}]` };
+    await orchestrator.send(conv.id, 'go');
+    await finish(conv.id);
+    await expect(orchestrator.answerFolder(conv.id, asking(conv).id, { allow: true })).rejects.toMatchObject({ status: 400 });
+    expect(cwdsOf(conv.settings)).toEqual([project, ...extra]);
+    expect(conv.settings.copies).toBeUndefined();
+    expect(git(other, 'worktree', 'list').split('\n')).toHaveLength(1);
   });
 
   it('can be answered once, and not after the user replied in words', async () => {
