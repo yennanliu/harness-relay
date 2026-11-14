@@ -407,6 +407,17 @@ const zhTW = {
 
   // Approvals
   approvalNotFound: '這個請求已經處理過或已失效',
+  folderMissing: (dir: string) => `找不到資料夾：${dir}`,
+  folderNotRepo: (dir: string) =>
+    `${dir} 不在 git repository 裡，無法建立副本。請先在那裡執行 git init 並提交一次，或在「團隊設定」把它加入工作目錄。`,
+  folderNoCommit: (root: string) => `${root} 還沒有任何 commit，無法建立副本。請先在那裡提交一次。`,
+  folderAllowed: (copy: string, of: string, branch: string) =>
+    `已允許。請在 ${copy} 工作：它是 ${of} 的副本（git worktree，分支 ${branch}），原本的資料夾不要更動。`,
+  folderAllowedEdit: (copy: string, of: string, branch: string) =>
+    `已允許，檔案權限也改為「可編輯」。請在 ${copy} 工作：它是 ${of} 的副本（git worktree，分支 ${branch}），原本的資料夾不要更動。`,
+  folderDenied: (dir: string, note?: string) => `不允許使用 ${dir}。${note ? note : '請在現有的工作目錄與權限內繼續。'}`,
+  copyCommitted: (branch: string, root: string) => `已把副本裡的變更提交到 ${root} 的分支 ${branch}（原本的檔案沒有更動）。`,
+  copyCommitFailed: (branch: string, why: string) => `無法把副本裡的變更提交到分支 ${branch}：${why}`,
   approvalDeclined: '使用者拒絕了這個操作。',
   retryAgentGone: (name: string) => `@${name} 已不在團隊中，無法重試這則回覆`,
 
@@ -967,6 +978,17 @@ const en: ServerMessages = {
   relayLimit: (hops) => `Reached the relay limit (${hops} hand-offs); back to you. Press Continue to let the team keep going.`,
 
   approvalNotFound: 'This request was already answered or has expired',
+  folderMissing: (dir) => `Folder not found: ${dir}`,
+  folderNotRepo: (dir) =>
+    `${dir} is not in a git repository, so no copy can be made. Run git init there and commit once, or add it to the working directories in Team settings.`,
+  folderNoCommit: (root) => `${root} has no commit yet, so no copy can be made. Commit once there first.`,
+  folderAllowed: (copy, of, branch) =>
+    `Allowed. Work in ${copy}: it is a copy of ${of} (a git worktree, branch ${branch}); leave the original folder as it is.`,
+  folderAllowedEdit: (copy, of, branch) =>
+    `Allowed, and the file permission is now "edit". Work in ${copy}: it is a copy of ${of} (a git worktree, branch ${branch}); leave the original folder as it is.`,
+  folderDenied: (dir, note) => `Not allowed to use ${dir}. ${note ? note : 'Carry on within the working directories and the permission you have.'}`,
+  copyCommitted: (branch, root) => `Committed the changes in the copy to branch ${branch} of ${root} (the files there were not changed).`,
+  copyCommitFailed: (branch, why) => `Could not commit the changes in the copy to branch ${branch}: ${why}`,
   approvalDeclined: 'The user declined this action.',
   retryAgentGone: (name) => `@${name} is no longer on the team, so this reply cannot be retried`,
 

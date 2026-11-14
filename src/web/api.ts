@@ -9,6 +9,7 @@ import type {
   ModelEndpointUpdate,
   AgentConfig,
   ApprovalAnswer,
+  FolderAnswer,
   AuthSessionView,
   ChatMessage,
   Conversation,
@@ -296,6 +297,9 @@ export const api = {
     request<Conversation>('POST', `/api/conversations/${id}/messages/${messageId}/branch`),
   answerApproval: (id: string, approvalId: string, answer: ApprovalAnswer) =>
     request<{ ok: true }>('POST', `/api/conversations/${id}/approvals/${approvalId}`, answer),
+  /** Allow or deny an agent's request for a folder outside the working directories. */
+  answerFolder: (id: string, messageId: string, answer: FolderAnswer) =>
+    request<{ ok: true }>('POST', `/api/conversations/${id}/messages/${messageId}/folder`, answer),
   confirmPlan: (id: string, messageId: string) =>
     request<{ ok: true }>('POST', `/api/conversations/${id}/messages/${messageId}/confirm-plan`),
   declinePlan: (id: string, messageId: string) =>

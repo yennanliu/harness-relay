@@ -408,6 +408,12 @@ const MIGRATIONS: string[] = [
     created_at INTEGER NOT NULL
   );
   `,
+  // 28: working directories that are Harness Relay's copies of repositories agents asked for in the
+  // chat (cwd_copies: a JSON array of CwdCopy: the working directory, the folder it is a copy of, that
+  // folder's repository root, the worktree's own folder and its branch; NULL: none).
+  `
+  ALTER TABLE conversations ADD COLUMN cwd_copies TEXT;
+  `,
 ];
 
 /**

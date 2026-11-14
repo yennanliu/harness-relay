@@ -580,6 +580,18 @@ export const zhTW = {
     withNote: (note: string) => `：${note}`,
   },
 
+  folder: {
+    heading: '想使用工作目錄以外的資料夾',
+    headingEdit: '想修改工作目錄以外的資料夾',
+    copyNote:
+      '允許的話，Harness Relay 會為這個 repository 建立一份副本（git worktree，新分支，從最後一次 commit 開始），agent 在副本裡工作。原本資料夾裡的檔案不會更動；成果是一個分支，由你決定要不要 push。副本裡沒有被 git 忽略的檔案（例如 node_modules、.env）。',
+    raises: '這個對話的檔案權限會改成「可編輯」。',
+    alsoEditable: (dirs: string) => `之後 agent 也能修改這個對話其他工作目錄裡的檔案：${dirs}`,
+    drops: (dirs: string) => `這些資料夾會從這個對話的工作目錄移除（由副本取代，或不能在「可編輯」權限下使用）：${dirs}`,
+    allow: '允許，建立副本',
+    allowedCopy: (copy: string, branch: string) => `已允許：在副本 ${copy} 工作（分支 ${branch}）`,
+  },
+
   plan: {
     planning: (lead: string) => `首席 agent（${lead}）正在為這個問題組隊…`,
     title: '團隊設計',

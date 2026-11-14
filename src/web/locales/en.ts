@@ -568,6 +568,18 @@ export const en: Messages = {
     withNote: (note) => `: ${note}`,
   },
 
+  folder: {
+    heading: 'asks to use a folder outside the working directories',
+    headingEdit: 'asks to change files in a folder outside the working directories',
+    copyNote:
+      'If you allow it, Harness Relay makes a copy of this repository (a git worktree on a new branch, starting from its last commit) and the agents work in the copy. The files in the folder itself are not changed; the result is a branch, which you push if you want it. The copy has none of the files git ignores (node_modules, .env and the like).',
+    raises: "This chat's file permission becomes “edit”.",
+    alsoEditable: (dirs) => `Agents can then also change files in this chat's other working directories: ${dirs}`,
+    drops: (dirs) => `These folders leave this chat's working directories (replaced by the copy, or not allowed with the edit permission): ${dirs}`,
+    allow: 'Allow, make a copy',
+    allowedCopy: (copy, branch) => `Allowed: working in the copy ${copy} (branch ${branch})`,
+  },
+
   plan: {
     planning: (lead) => `The lead agent (${lead}) is choosing a team for this question…`,
     title: 'Team design',

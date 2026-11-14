@@ -203,6 +203,10 @@ function replyBlock(p: Exclude<MessagePart, { type: 'tool' }>): Record<string, u
       const answer = `${APPROVAL_ANSWER[p.status]}${p.always ? ' for the rest of the conversation' : ''}${p.note ? `: "${p.note}"` : ''}`;
       return { type: 'text', text: `[Asked to ${APPROVAL_ASK[p.kind]}${what ? ` ${what}` : ''}: ${answer}]` };
     }
+    case 'folder': {
+      const answer = p.status === 'allowed' ? `allowed, as a copy at ${p.copy ?? '?'} (branch ${p.branch ?? '?'})` : p.status === 'denied' ? `denied${p.note ? `: "${p.note}"` : ''}` : 'no answer yet';
+      return { type: 'text', text: `[Asked for the folder \`${p.path}\`${p.edit ? ' with edit access' : ''}: ${answer}]` };
+    }
     case 'attachment':
       return { type: 'text', text: `[${p.name}]` };
   }

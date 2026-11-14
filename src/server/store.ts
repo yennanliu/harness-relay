@@ -10,6 +10,7 @@ import type {
   ConversationBranch,
   ConversationGroup,
   ConversationSchedule,
+  CwdCopy,
   ConversationSummary,
   Lang,
   MessagePart,
@@ -80,6 +81,7 @@ interface ConversationRow {
   permission: Permission;
   cwd: string;
   extra_cwds: string | null;
+  cwd_copies: string | null;
   auto_team: number;
   auto_confirm: number;
   approvals: string | null;
@@ -246,6 +248,8 @@ function toPart(r: PartRow): MessagePart {
       return { type: 'plan', entries: parseJson(r.data, []) };
     case 'approval':
       return { type: 'approval', ...parseJson(r.data, { id: '', kind: 'other' as const, status: 'expired' as const }) };
+    case 'folder':
+      return { type: 'folder', ...parseJson(r.data, { path: '', status: 'denied' as const }) };
     case 'attachment':
       return { type: 'attachment', ...parseJson(r.data, { id: '', name: 'file', mimeType: 'application/octet-stream', size: 0 }) };
     default:
@@ -264,6 +268,7 @@ function partColumns(p: MessagePart): (string | null)[] {
     case 'plan':
       return [null, null, null, null, null, null, null, JSON.stringify(p.entries)];
     case 'approval':
+    case 'folder':
     case 'attachment': {
       const { type: _type, ...data } = p;
       return [null, null, null, null, null, null, null, JSON.stringify(data)];
@@ -303,6 +308,16 @@ function moreChanges(json: string | null): MessageChanges[] {
 function extraCwdsOf(json: string | null): string[] {
   const list = parseJson<unknown>(json, []);
   return Array.isArray(list) ? list.filter((d): d is string => typeof d === 'string' && d.length > 0) : [];
+}
+
+/** A conversation's working directories that are copies (`cwd_copies`), leaving out what cannot be read. */
+function copiesOf(json: string | null): CwdCopy[] {
+  const list = parseJson<unknown>(json, []);
+  if (!Array.isArray(list)) return [];
+  const text = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
+  return (list as Partial<CwdCopy>[]).filter(
+    (c): c is CwdCopy => Boolean(c) && text(c.path) && text(c.of) && text(c.root) && text(c.tree) && text(c.branch),
+  );
 }
 
 function toMessage(r: MessageRow, parts: MessagePart[], files: FileChange[]): ChatMessage {
@@ -729,6 +744,7 @@ export class Store {
         ...(c.auto_team ? { autoTeam: true } : {}),
         ...(c.auto_confirm ? { autoConfirm: true } : {}),
         ...(c.approvals === 'deny' ? { approvals: 'deny' as const } : {}),
+        ...(copiesOf(c.cwd_copies).length ? { copies: copiesOf(c.cwd_copies) } : {}),
       },
       messages,
       agentState,
@@ -748,8 +764,8 @@ export class Store {
       this.db
         .prepare(
           `INSERT INTO conversations (id, title, created_at, updated_at, mode, rounds, max_hops, permission, cwd, extra_cwds,
-                                     auto_team, auto_confirm, approvals, allow_rules, pause, branch)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                     auto_team, auto_confirm, approvals, allow_rules, pause, branch, cwd_copies)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           conv.id,
@@ -768,6 +784,7 @@ export class Store {
           conv.allowRules?.length ? JSON.stringify(conv.allowRules) : null,
           conv.pause ? JSON.stringify(conv.pause) : null,
           conv.branch ? JSON.stringify(conv.branch) : null,
+          s.copies?.length ? JSON.stringify(s.copies) : null,
         );
       this.writeAgents(conv);
       if (conv.messages.length) this.insertMessages(conv.id, conv, new Set(conv.messages.map((m) => m.id)));
@@ -783,7 +800,8 @@ export class Store {
       this.db
         .prepare(
           `UPDATE conversations SET title = ?, updated_at = ?, mode = ?, rounds = ?, max_hops = ?, permission = ?, cwd = ?,
-             extra_cwds = ?, auto_team = ?, auto_confirm = ?, approvals = ?, allow_rules = ?, pause = ?, branch = ?
+             extra_cwds = ?, auto_team = ?, auto_confirm = ?, approvals = ?, allow_rules = ?, pause = ?, branch = ?,
+             cwd_copies = ?
            WHERE id = ?`,
         )
         .run(
@@ -801,6 +819,7 @@ export class Store {
           conv.allowRules?.length ? JSON.stringify(conv.allowRules) : null,
           conv.pause ? JSON.stringify(conv.pause) : null,
           conv.branch ? JSON.stringify(conv.branch) : null,
+          s.copies?.length ? JSON.stringify(s.copies) : null,
           conv.id,
         );
       this.writeAgents(conv);
@@ -1303,12 +1322,16 @@ export class Store {
     ).map((r) => r.title);
   }
 
-  /** The conversations' working directories (all of each), each once, the most recently used first. */
+  /**
+   * The conversations' working directories (all of each), each once, the most recently used first.
+   * Not the copies of repositories agents asked for: each is its own conversation's.
+   */
   listCwds(): string[] {
     const rows = this.db
-      .prepare('SELECT cwd, extra_cwds FROM conversations ORDER BY updated_at DESC, cwd')
-      .all() as { cwd: string; extra_cwds: string | null }[];
-    return [...new Set(rows.flatMap((r) => [r.cwd, ...extraCwdsOf(r.extra_cwds)]))];
+      .prepare('SELECT cwd, extra_cwds, cwd_copies FROM conversations ORDER BY updated_at DESC, cwd')
+      .all() as { cwd: string; extra_cwds: string | null; cwd_copies: string | null }[];
+    const copies = new Set(rows.flatMap((r) => copiesOf(r.cwd_copies).map((c) => c.path)));
+    return [...new Set(rows.flatMap((r) => [r.cwd, ...extraCwdsOf(r.extra_cwds)]))].filter((dir) => !copies.has(dir));
   }
 
   // Search -------------------------------------------------------------------------

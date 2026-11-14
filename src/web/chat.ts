@@ -4,6 +4,7 @@ import type {
   ChatMessage,
   Conversation,
   ConversationBranch,
+  ConversationSettings,
   ConversationSummary,
   MessagePart,
   Mode,
@@ -13,6 +14,7 @@ import type {
   TeamPlan,
   TeamRevision,
 } from '../shared/types';
+import { cwdsOf } from '../shared/types';
 import { ApiError } from './api';
 import type { ApplyState } from './components/ChangesCard';
 import type { Team } from './components/TeamEditor';
@@ -280,6 +282,21 @@ export function enterSends(key: { key: string; shiftKey: boolean; metaKey: boole
 
 export type ToolPart = Extract<MessagePart, { type: 'tool' }>;
 export type ApprovalPart = Extract<MessagePart, { type: 'approval' }>;
+export type FolderPart = Extract<MessagePart, { type: 'folder' }>;
+
+/**
+ * What allowing a folder request changes besides adding the copy, for its card: whether the
+ * conversation's permission goes from read-only to edit (`raises`), the working directories that
+ * leave it (`drops`), and the ones agents can then change too (`alsoEditable`: the others, once it is edit).
+ */
+export function folderEffects(
+  part: FolderPart,
+  settings: Pick<ConversationSettings, 'permission' | 'cwd' | 'extraCwds'>,
+): { raises: boolean; drops: string[]; alsoEditable: string[] } {
+  const raises = Boolean(part.edit) && settings.permission === 'read-only';
+  const drops = part.drops ?? [];
+  return { raises, drops, alsoEditable: raises ? cwdsOf(settings).filter((dir) => !drops.includes(dir)) : [] };
+}
 
 /** One step of an agent's work between its words: a tool call, or a stretch of its reasoning. */
 export type ActivityItem = { kind: 'tool'; part: ToolPart; key: number } | { kind: 'thinking'; text: string; key: number };
@@ -292,7 +309,8 @@ export type Segment =
   | { kind: 'text'; text: string; key: number }
   | { kind: 'activity'; items: ActivityItem[]; key: number; last: boolean }
   | { kind: 'todo'; entries: PlanEntry[]; key: number }
-  | { kind: 'approval'; part: ApprovalPart; key: number };
+  | { kind: 'approval'; part: ApprovalPart; key: number }
+  | { kind: 'folder'; part: FolderPart; key: number };
 
 /**
  * A message's parts as segments. Blank text and thinking are left out, so they don't split a run of
@@ -322,6 +340,9 @@ export function segments(parts: MessagePart[]): Segment[] {
         break;
       case 'approval':
         out.push({ kind: 'approval', part: p, key: i });
+        break;
+      case 'folder':
+        out.push({ kind: 'folder', part: p, key: i });
         break;
     }
   });

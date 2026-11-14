@@ -783,6 +783,11 @@ export interface ConversationSettings {
    * ask the user in the chat (default), or refuse automatically.
    */
   approvals?: 'ask' | 'deny';
+  /**
+   * The working directories that are copies of repositories agents asked for (absent: none). Each
+   * one's `path` is `cwd` or one of `extraCwds`; one whose working directory was removed is dropped.
+   */
+  copies?: CwdCopy[];
 }
 
 /**
@@ -975,8 +980,57 @@ export type MessagePart =
       /** The user's message to the agent when declining. */
       note?: string;
     }
+  /**
+   * The agent asked for a git repository outside the conversation's working directories (its reply
+   * ended with `FOLDER_TOKEN`); the user decides on a card. Allowed: Harness Relay made a copy of it
+   * (a git worktree on a new branch) and added that to the working directories.
+   */
+  | {
+      type: 'folder';
+      /** The folder asked for, as an absolute path. */
+      path: string;
+      /** Edit access was asked too: allowing raises a read-only conversation to edit. */
+      edit?: boolean;
+      /**
+       * Working directories that leave the conversation when this is allowed: the folder itself, which
+       * its copy replaces, and with `edit` the ones edit mode refuses (Harness Relay's own folder).
+       */
+      drops?: string[];
+      status: FolderRequestStatus;
+      /** Allowed: the copy the agents work in, and its branch in the repository asked for. */
+      copy?: string;
+      branch?: string;
+      /** The user's message to the agent when denying. */
+      note?: string;
+    }
   /** A file the user attached to their message (stored under data/attachments). */
   | { type: 'attachment'; id: string; name: string; mimeType: string; size: number };
+
+export type FolderRequestStatus = 'pending' | 'allowed' | 'denied';
+
+/** The user's answer to an agent's request for a folder (`POST …/messages/:messageId/folder`). */
+export interface FolderAnswer {
+  allow: boolean;
+  /** Message to the agent when denying. */
+  note?: string;
+}
+
+/**
+ * A working directory that is Harness Relay's copy of a repository an agent asked for: a git worktree
+ * of it on a branch of its own, under the data folder. The agents change the copy, never the
+ * repository's own checkout; what they change is committed to the branch when a run ends.
+ */
+export interface CwdCopy {
+  /** The working directory: the folder asked for, as it is inside the copy. */
+  path: string;
+  /** The folder the agent asked for. */
+  of: string;
+  /** That folder's repository root, which the worktree belongs to. */
+  root: string;
+  /** The worktree's own top folder. */
+  tree: string;
+  branch: string;
+}
 
 /** Limits for files attached to one message. */
 export const ATTACHMENT_LIMITS = { maxFiles: 10, maxBytes: 20 * 1024 * 1024 };

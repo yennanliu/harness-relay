@@ -119,6 +119,8 @@ export interface Fake {
   during: ((name: string, cwd: string) => void) | undefined;
   /** Agents that ask the user a question until their prompt carries an answer ("ANSWER:"). */
   asking: Set<string>;
+  /** Agents that ask for a folder, once: what each one's reply ends with (`[ASK_FOLDER …]`). */
+  folderAsk: Record<string, string>;
   /** Makes an agent's fake CLI run fail (after it wrote its files), e.g. to simulate a rate limit. */
   fail: ((name: string, sessionId?: string) => Error | undefined) | undefined;
   /** The way to ask the user that a fake CLI run whose prompt says "keep asking" had (kept past its turn). */
@@ -138,6 +140,7 @@ const fresh = (): Fake => ({
   sorterGate: undefined,
   during: undefined,
   asking: new Set(),
+  folderAsk: {},
   fail: undefined,
   keptAsk: undefined,
 });
@@ -251,6 +254,13 @@ beforeAll(() => {
       }
       if (fake.asking.has(name) && !o.prompt.includes('ANSWER:')) {
         o.onEvent({ type: 'text', text: `${name} asks: A or B?\n\n[ASK_USER]` });
+        o.onEvent({ type: 'text_end' });
+        return { sessionId: `session-${name}` };
+      }
+      const folderAsk = fake.folderAsk[name];
+      if (folderAsk) {
+        delete fake.folderAsk[name];
+        o.onEvent({ type: 'text', text: `${name} needs another repository.\n\n${folderAsk}` });
         o.onEvent({ type: 'text_end' });
         return { sessionId: `session-${name}` };
       }

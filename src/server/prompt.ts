@@ -11,7 +11,7 @@ import {
   type Provider,
   cwdsOf,
 } from '../shared/types';
-import { ASK_TOKEN } from '../shared/ask';
+import { ASK_TOKEN, FOLDER_TOKEN } from '../shared/ask';
 import { mentionsInMarkdown } from '../shared/mentions';
 import { attachmentPath } from './attachments';
 import type { AgentTools } from './tools';
@@ -96,6 +96,30 @@ ${ws.folders.map((f) => `  - ${f.cwd} (branch ${f.branch}), from a snapshot (${s
 - Teammates work in parallel in their own worktrees. Their branches: ${mates}. To read a teammate's work: \`git diff <the snapshot it started from> <branch>\` or \`git show <branch>:<path>\`${one ? '' : ', in that repository'}.
 ${access}
 - Your changes are committed to your branch${one ? '' : 'es'} automatically after each turn; the user reviews the diffs and decides whose result to apply. Do not commit, merge, rebase or switch branches yourself.`;
+}
+
+/**
+ * The working directories that are copies of repositories the agents asked for ('' when none): what
+ * each is a copy of, and that the work goes into the copy.
+ */
+function copyRules(conv: Conversation): string {
+  const copies = conv.settings.copies ?? [];
+  if (!copies.length) return '';
+  const list = copies.map((c) => `  - ${c.path} is a copy of ${c.of} (branch ${c.branch} of the repository ${c.root})`).join('\n');
+  return `
+- Some working directories are copies of the user's repositories, made when an agent asked for them: each is a git worktree on a branch of its own.
+${list}
+  Do the work in the copy and leave the original folder as it is. A copy starts from the repository's last commit, so what git ignores there (installed dependencies, .env files, build output) is missing: install or build in the copy when you need it. Harness Relay commits what changed in a copy to its branch when the team's run ends; do not commit, switch branches, push or open a pull request yourself unless the user asks for it.`;
+}
+
+/**
+ * How to ask for a folder the agent does not have ('' in a conversation with full access, where it
+ * can reach any folder by itself).
+ */
+function folderRule(conv: Conversation): string {
+  if (conv.settings.permission === 'full') return '';
+  return `
+- If the task needs a git repository that is not among your working directories, or needs you to change files while your file access is read-only, do not ask the user to change the settings: say in a sentence or two which folder you need and why, and end your reply with ${FOLDER_TOKEN} <absolute path>] on its own line, with " edit" after the path when you need to change files there (for example ${FOLDER_TOKEN} /home/me/project edit]). The user sees a card to allow or deny it. Once allowed, Harness Relay gives you a copy of that repository to work in (a git worktree on a new branch), and you go on from there. Ask only for a folder the task really needs.`;
 }
 
 /**
@@ -198,12 +222,12 @@ ${team}
 - Address teammates by @Name. Stay within your role; don't do a teammate's job unless asked.
 - Be concise and don't restate what others already said. If you have nothing useful to add, reply with exactly ${PASS_TOKEN}.
 - If a good answer depends on something only the user knows (their situation, goal, constraints or preference) and a guess would likely send your answer the wrong way, ask before answering: ask briefly (at most three questions, with options when that helps), don't answer yet, and end your reply with ${ASK_TOKEN} on its own line. The team then waits for the user; once they reply, you answer first, with their answer in hand. Don't ask about details you can reasonably assume — state the assumption and answer — and don't ask what the user or a teammate has already settled.
-- Reply in the same language the user writes in.${scheduleRules(conv, unattended)}${branchRules(conv)}
+- Reply in the same language the user writes in.${scheduleRules(conv, unattended)}${branchRules(conv)}${folderRule(conv)}
 - The chat renders Markdown, and \`\`\`mermaid code blocks are drawn as diagrams. To show an image or video (PNG, JPEG, GIF, WebP, AVIF, SVG, MP4, WebM, MOV), save it inside your working directory and embed it with a path relative to that directory, e.g. \`![Sales by month](charts/sales.png)\` or \`![Demo](out/demo.mp4)\`. Images from websites are shown only as links.
 - To hand the user a file you made (a PDF, slides, a document, a spreadsheet, an archive…), save it inside your working directory and link it with a path relative to that directory, e.g. \`[Q3 report](out/report.pdf)\`, or \`[Deck](<out/Q3 deck.pptx>)\` when the path has spaces. The user downloads it from that link, on this computer or another device; only files inside your working directory can be downloaded.
 
 # Workspace
-${workspaceRules(conv, ws)}${toolSections(tools, !nativeOff.includes('skills'), canReadFiles(agent.provider, nativeOff, nativeItems))}`;
+${workspaceRules(conv, ws)}${copyRules(conv)}${toolSections(tools, !nativeOff.includes('skills'), canReadFiles(agent.provider, nativeOff, nativeItems))}`;
 }
 
 /**

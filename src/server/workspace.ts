@@ -147,10 +147,12 @@ interface GitOptions {
   complete?: boolean;
   /** Keep the first `maxCapture` bytes instead of the last. */
   keepStart?: boolean;
+  /** Commit as the user's own git identity, not Harness Relay's (`commitCopy`). */
+  ownIdentity?: boolean;
 }
 
 async function git(cwd: string, args: string[], o: GitOptions = {}) {
-  const env: NodeJS.ProcessEnv = { ...process.env, ...IDENTITY, ...o.env };
+  const env: NodeJS.ProcessEnv = { ...process.env, ...(o.ownIdentity ? {} : IDENTITY), ...o.env };
   delete env.GIT_DIR; // never inherit a repository from the server's own environment
   delete env.GIT_WORK_TREE;
   if (!o.env?.GIT_INDEX_FILE) delete env.GIT_INDEX_FILE;
@@ -176,7 +178,7 @@ async function git(cwd: string, args: string[], o: GitOptions = {}) {
 }
 
 /** A repository too broad to snapshot on every turn: one rooted at the home directory or a file-system root. */
-function tooBroadRepo(root: string): boolean {
+export function tooBroadRepo(root: string): boolean {
   return root === realpathSync(homedir()) || root === parse(root).root;
 }
 
@@ -388,6 +390,46 @@ export async function commitWorktree(path: string, message: string): Promise<str
   const staged = await git(path, ['diff', '--cached', '--quiet'], { allowFail: true });
   if (staged.code === 0) return null;
   await git(path, ['commit', '-q', '--no-verify', '-m', message]);
+  return worktreeHead(path);
+}
+
+/** The commit a repository's HEAD names, or null when it has no commit yet. */
+export async function headCommit(root: string): Promise<string | null> {
+  const r = await git(root, ['rev-parse', '--verify', '-q', 'HEAD^{commit}'], { allowFail: true });
+  return r.code === 0 && out(r) ? out(r) : null;
+}
+
+/** Whether the repository has a local branch of this name. */
+export async function branchExists(root: string, branch: string): Promise<boolean> {
+  return (await git(root, ['show-ref', '--verify', '-q', `refs/heads/${branch}`], { allowFail: true })).code === 0;
+}
+
+/**
+ * A name for a branch made from a folder's name: only what a ref takes everywhere (letters, digits,
+ * `.`, `_`, `-`), not starting with `.` or `-` nor ending in `.` or `.lock`; `repo` when nothing is left.
+ */
+export function branchSlug(name: string): string {
+  const slug = name
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/\.{2,}/g, '.')
+    .replace(/^[.-]+|[.-]+$/g, '')
+    .replace(/\.lock$/i, '')
+    .slice(0, 60);
+  return slug || 'repo';
+}
+
+/**
+ * Commit everything in a copy of a repository an agent asked for (`CwdCopy`) to its branch; returns
+ * the new HEAD, or null when nothing changed. The branch is the user's to push, so the commit is
+ * theirs: made as their own git identity, and as Harness Relay's only where they have none.
+ */
+export async function commitCopy(path: string, message: string): Promise<string | null> {
+  await git(path, ['add', '-A']);
+  const staged = await git(path, ['diff', '--cached', '--quiet'], { allowFail: true });
+  if (staged.code === 0) return null;
+  const commit = ['commit', '-q', '--no-verify', '-m', message];
+  const own = await git(path, commit, { ownIdentity: true, allowFail: true });
+  if (own.code !== 0) await git(path, commit);
   return worktreeHead(path);
 }
 

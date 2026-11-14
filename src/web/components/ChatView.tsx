@@ -4,6 +4,7 @@ import {
   cwdsOf,
   pendingPlan,
   type ApprovalAnswer,
+  type FolderAnswer,
   type ChatMessage,
   type Conversation,
   type ConversationBranch,
@@ -427,6 +428,17 @@ export function ChatView({ id, providers, catalog, conversations, onChanged }: P
   const applyStates = useMemo(() => findApplyStates(messages ?? [], worktrees ?? {}), [messages, worktrees]);
 
   // Stable while messages stream, so MessageItem (memoised) only re-renders the message that changed.
+  const onFolder = useCallback(async (messageId: string, answer: FolderAnswer) => {
+    const c = convRef.current;
+    if (!c) return;
+    setError('');
+    try {
+      await api.answerFolder(c.id, messageId, answer);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, []);
+
   const agents = state.conv?.agents;
   const mentionNames = useMemo(() => (agents ?? []).map((a) => a.name), [agents]);
 
@@ -646,6 +658,8 @@ export function ChatView({ id, providers, catalog, conversations, onChanged }: P
                 onSavePlan={onSavePlan}
                 onAdjustTeam={onAdjustTeam}
                 onApproval={onApproval}
+                onFolder={onFolder}
+                folderSettings={askIds.has(m.id) && m.parts.some((p) => p.type === 'folder') ? conv.settings : undefined}
                 onRetry={onRetry}
                 waitingAnswer={askIds.has(m.id)}
                 onSkipQuestion={onSkipQuestion}

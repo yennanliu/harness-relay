@@ -6,14 +6,17 @@ import {
   type AgentConfig,
   type ApprovalAnswer,
   type ChatMessage,
+  type ConversationSettings,
+  type FolderAnswer,
   type MessageMeta,
   type PlanEntry,
 } from '../../shared/types';
-import { splitAsk } from '../../shared/ask';
+import { withoutAskMarkers } from '../../shared/ask';
 import { api } from '../api';
 import {
   activityCounts,
   enterSends,
+  folderEffects,
   isPathDetail,
   isTouchScreen,
   segments,
@@ -21,6 +24,7 @@ import {
   thoughtTitle,
   type ActivityItem,
   type ApprovalPart,
+  type FolderPart,
   type ToolPart,
 } from '../chat';
 import { mentionWarning, messageText, planChecksMentions, planHeadline, planWording, speaker } from '../copy';
@@ -181,6 +185,107 @@ function TodoList({ entries }: { entries: PlanEntry[] }) {
   );
 }
 
+/**
+ * An agent asks for a folder outside the working directories. `waiting`: the team stopped for it, so it
+ * can be answered; one left without an answer (the user replied in words instead) shows as expired.
+ */
+function FolderCard({
+  part,
+  agentName,
+  waiting,
+  settings,
+  onAnswer,
+}: {
+  part: FolderPart;
+  agentName: string;
+  waiting: boolean;
+  settings?: ConversationSettings;
+  onAnswer: (answer: FolderAnswer) => Promise<void>;
+}) {
+  const t = useT();
+  const [note, setNote] = useState('');
+  const [sending, setSending] = useState(false);
+  const heading = `@${agentName} ${part.edit ? t.folder.headingEdit : t.folder.heading}`;
+
+  if (part.status !== 'pending' || !waiting) {
+    const outcome =
+      part.status === 'allowed'
+        ? part.copy && part.branch
+          ? t.folder.allowedCopy(part.copy, part.branch)
+          : t.approval.allowed
+        : part.status === 'denied'
+          ? t.approval.denied
+          : t.approval.expired;
+    const mark = part.status === 'allowed' ? '✓' : part.status === 'denied' ? '✗' : '–';
+    return (
+      <div className={`approval-done ${part.status === 'pending' ? 'expired' : part.status}`}>
+        <span className="approval-mark" aria-hidden>
+          {mark}
+        </span>
+        <span className="approval-text">
+          <span className="approval-what">
+            <code>{part.path}</code>
+          </span>
+          <span className="approval-outcome">
+            {outcome}
+            {part.note ? t.approval.withNote(part.note) : ''}
+          </span>
+        </span>
+      </div>
+    );
+  }
+
+  const effects = settings ? folderEffects(part, settings) : { raises: false, drops: part.drops ?? [], alsoEditable: [] };
+  const list = (dirs: string[]) => dirs.join(t.common.listSeparator);
+  const answer = async (a: FolderAnswer) => {
+    setSending(true);
+    try {
+      await onAnswer(a);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <section className="approval-card folder-card" aria-label={heading}>
+      <header className="approval-head">
+        <span className="approval-icon" aria-hidden>
+          ⏸
+        </span>
+        <strong>{heading}</strong>
+        <span className="approval-waiting">{t.approval.waiting}</span>
+      </header>
+      <pre className="approval-detail">{part.path}</pre>
+      <p className="approval-reason">{t.folder.copyNote}</p>
+      {effects.raises && <p className="approval-reason approval-sandbox">{t.folder.raises}</p>}
+      {effects.alsoEditable.length > 0 && <p className="approval-reason approval-sandbox">{t.folder.alsoEditable(list(effects.alsoEditable))}</p>}
+      {effects.drops.length > 0 && <p className="approval-reason approval-sandbox">{t.folder.drops(list(effects.drops))}</p>}
+      <input
+        className="approval-note"
+        value={note}
+        placeholder={t.approval.notePlaceholder}
+        onChange={(e) => setNote(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && !e.nativeEvent.isComposing && note.trim()) void answer({ allow: false, note });
+        }}
+      />
+      <div className="approval-actions">
+        <button type="button" className="primary small-button" disabled={sending} onClick={() => answer({ allow: true })}>
+          {t.folder.allow}
+        </button>
+        <button
+          type="button"
+          className="ghost small-button approval-deny"
+          disabled={sending}
+          onClick={() => answer({ allow: false, note: note.trim() || undefined })}
+        >
+          {t.approval.deny}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 /** An agent asks to do something its permission does not cover. */
 function ApprovalCard({
   part,
@@ -330,6 +435,10 @@ interface Props {
   onAdjustTeam: () => void;
   /** Answer an agent's approval request. */
   onApproval: (approvalId: string, answer: ApprovalAnswer) => Promise<void>;
+  /** Answer an agent's request for a folder outside the working directories. */
+  onFolder: (messageId: string, answer: FolderAnswer) => Promise<void>;
+  /** The conversation's settings, for a folder request that waits: what allowing it changes. */
+  folderSettings?: ConversationSettings;
   /** Let the agent answer again (drops this reply and what follows). */
   onRetry: (messageId: string) => Promise<void>;
   /** This reply's question waits for the user's answer (the team stopped for it). */
@@ -686,6 +795,8 @@ export const MessageItem = memo(function MessageItem({
   onSavePlan,
   onAdjustTeam,
   onApproval,
+  onFolder,
+  folderSettings,
   onRetry,
   waitingAnswer,
   onSkipQuestion,
@@ -727,6 +838,7 @@ export const MessageItem = memo(function MessageItem({
   const provider = who.provider ?? 'claude';
   const live = msg.status === 'streaming';
   const segs = segments(msg.parts);
+  const asksFolder = msg.parts.some((p) => p.type === 'folder' && p.status === 'pending');
   const m = msg.meta;
   const copyable = !msg.passed && messageText(msg).length > 0;
 
@@ -754,7 +866,7 @@ export const MessageItem = memo(function MessageItem({
                 return (
                   <Markdown
                     key={s.key}
-                    text={live ? splitAsk(s.text).text : s.text}
+                    text={live ? withoutAskMarkers(s.text) : s.text}
                     mentions={mentionNames}
                     mediaBase={api.mediaBase(convId, msg.id)}
                     downloadBase={api.downloadBase(convId, msg.id)}
@@ -766,6 +878,17 @@ export const MessageItem = memo(function MessageItem({
                 return <TodoList key={s.key} entries={s.entries} />;
               case 'approval':
                 return <ApprovalCard key={s.key} part={s.part} agentName={name} live={live} onAnswer={onApproval} />;
+              case 'folder':
+                return (
+                  <FolderCard
+                    key={s.key}
+                    part={s.part}
+                    agentName={name}
+                    waiting={Boolean(waitingAnswer)}
+                    settings={folderSettings}
+                    onAnswer={(a) => onFolder(msg.id, a)}
+                  />
+                );
             }
           })
         )}
@@ -786,7 +909,9 @@ export const MessageItem = memo(function MessageItem({
             onApply={() => onApply(agentId)}
           />
         )}
-        {waitingAnswer && (
+        {/* A folder request is answered on its own card (its id is there for the banner's scroll). */}
+        {waitingAnswer && asksFolder && <span id={`ask-${msg.id}`} />}
+        {waitingAnswer && !asksFolder && (
           <div className="ask-card" id={`ask-${msg.id}`}>
             <strong>{t.message.askWaiting}</strong>
             <span className="muted">{t.message.askNote(name)}</span>

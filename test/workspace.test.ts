@@ -6,7 +6,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   applyPatch,
   applyToWorkingTree,
+  branchExists,
+  branchSlug,
   checkPatch,
+  commitCopy,
   commitWorktree,
   createWorktree,
   diffFiles,
@@ -14,6 +17,7 @@ import {
   dropKeptCommits,
   ensureRepo,
   excludePathspecs,
+  headCommit,
   keepCommits,
   parseDiffFiles,
   removeWorktree,
@@ -183,6 +187,59 @@ describe('worktrees', () => {
     await expect(applyToWorkingTree(repo, base, head)).rejects.toThrow(/衝突/);
     expect(readFileSync(join(repo, 'README.md'), 'utf8')).toBe('edited by the user\n');
     expect(existsSync(join(repo, 'OTHER.md'))).toBe(false);
+  });
+});
+
+describe("a copy of a repository an agent asked for", () => {
+  const commit = (cwd: string) => {
+    git(cwd, 'init', '-q');
+    git(cwd, 'add', '-A');
+    git(cwd, '-c', 'user.name=First', '-c', 'user.email=first@example.com', 'commit', '-q', '-m', 'first');
+  };
+
+  it('knows a repository\'s last commit, and that a new one has none', async () => {
+    git(repo, 'init', '-q');
+    expect(await headCommit(repo)).toBeNull();
+    git(repo, 'add', '-A');
+    git(repo, '-c', 'user.name=First', '-c', 'user.email=first@example.com', 'commit', '-q', '-m', 'first');
+    expect(await headCommit(repo)).toBe(git(repo, 'rev-parse', 'HEAD'));
+  });
+
+  it('commits what changed in it to its branch as the user, and leaves the repository\'s own checkout alone', async () => {
+    commit(repo);
+    git(repo, 'config', 'user.name', 'Repo Owner');
+    git(repo, 'config', 'user.email', 'owner@example.com');
+    const head = (await headCommit(repo))!;
+    const wt = join(dir, 'copies', 'copy-1');
+    await createWorktree(repo, wt, 'relay/test/project', head);
+    expect(await branchExists(repo, 'relay/test/project')).toBe(true);
+    expect(await branchExists(repo, 'relay/test/other')).toBe(false);
+    expect(await commitCopy(wt, 'nothing yet')).toBeNull();
+
+    writeFileSync(join(wt, 'src', 'app.ts'), 'export const x = 2;\n');
+    const made = await commitCopy(wt, 'Harness Relay: the task');
+    expect(made).toBe(git(repo, 'rev-parse', 'relay/test/project'));
+    expect(git(repo, 'log', '-1', '--format=%an <%ae>|%s|%P', 'relay/test/project')).toBe(`Repo Owner <owner@example.com>|Harness Relay: the task|${head}`);
+    // The checkout the user works in: same branch, same commit, same files.
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(head);
+    expect(git(repo, 'status', '--porcelain')).toBe('');
+    expect(readFileSync(join(repo, 'src', 'app.ts'), 'utf8')).toBe('export const x = 1;\n');
+    expect(await commitCopy(wt, 'again')).toBeNull();
+
+    // Removing the copy keeps the branch.
+    await removeWorktree(repo, wt);
+    expect(existsSync(wt)).toBe(false);
+    expect(git(repo, 'rev-parse', 'relay/test/project')).toBe(made);
+  });
+
+  it('names a branch after a folder with only what a ref takes', () => {
+    expect(branchSlug('agent_auto_system')).toBe('agent_auto_system');
+    expect(branchSlug('My Project (v2)')).toBe('My-Project-v2');
+    expect(branchSlug('..hidden..')).toBe('hidden');
+    expect(branchSlug('repo.lock')).toBe('repo');
+    expect(branchSlug('a..b')).toBe('a.b');
+    expect(branchSlug('專案')).toBe('repo');
+    expect(branchSlug('')).toBe('repo');
   });
 });
 

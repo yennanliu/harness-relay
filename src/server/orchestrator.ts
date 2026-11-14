@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, realpathSync, rmSync } from 'node:fs';
-import { basename, join, sep } from 'node:path';
+import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { basename, isAbsolute, join, resolve, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type {
   AgentConfig,
@@ -12,16 +12,20 @@ import type {
   Conversation,
   ConversationBranch,
   ConversationSchedule,
+  ConversationSettings,
+  CwdCopy,
   FileChange,
+  FolderAnswer,
   MessageChanges,
   MessagePart,
+  Permission,
   Provider,
   RunPause,
   TeamPreset,
   TeamRevision,
 } from '../shared/types';
-import { splitAsk } from '../shared/ask';
-import { OPEN_PROVIDERS, PROVIDER_LABEL, REVISE_REQUEST_MAX, cwdsOf, isEndpointCli, isOpenProvider, pendingPlan, permissionAbove, planSavable } from '../shared/types';
+import { splitAsk, splitFolderAsk, type FolderAsk } from '../shared/ask';
+import { MAX_CWDS, OPEN_PROVIDERS, PROVIDER_LABEL, REVISE_REQUEST_MAX, cwdSettings, cwdsOf, isEndpointCli, isOpenProvider, pendingPlan, permissionAbove, planSavable } from '../shared/types';
 import { AgentRunError, runners, type AgentEvent, type RunResult } from './agents';
 import { emptyStateFolder, removeConversationState } from './agents/open';
 import { stateKeys, type ApprovalRequest } from './agents/types';
@@ -72,7 +76,10 @@ import { DATA_DIR, OPEN_HOMES_DIR, type SettingsStore } from './settings';
 import type { Store } from './store';
 import {
   applyPatch,
+  branchExists,
+  branchSlug,
   checkPatch,
+  commitCopy,
   commitWorktree,
   createWorktree,
   diffFiles,
@@ -80,15 +87,18 @@ import {
   dropKeptCommits,
   ensureRepo,
   forgetCommits,
+  headCommit,
   keepCommits,
   repoRoot,
   removeWorktree,
   snapshot,
+  tooBroadRepo,
   worktreeCwd,
+  worktreeDir,
   worktreeHead,
 } from './workspace';
 import { isBranchTitle, isDefaultTitle, t } from './i18n';
-import { sameFolder, validateAgents } from './validate';
+import { expandPath, sameFolder, validateAgents } from './validate';
 import { agentFolderOptions, relayFolderRefusal } from './protect';
 import { scheduleTime } from './scheduler';
 
@@ -415,6 +425,37 @@ function takeAsk(msg: ChatMessage): boolean {
     return asks;
   }
   return false;
+}
+
+/**
+ * A finished reply that ends with the folder marker asks for a folder: the marker is taken out of the
+ * message. Returns what it asks for, if anything.
+ */
+function takeFolderAsk(msg: ChatMessage): FolderAsk | undefined {
+  for (let i = msg.parts.length - 1; i >= 0; i--) {
+    const part = msg.parts[i]!;
+    if (part.type !== 'text') continue;
+    const { text, folder } = splitFolderAsk(part.text);
+    if (text === part.text) return undefined;
+    if (text) part.text = text;
+    else msg.parts.splice(i, 1);
+    return folder;
+  }
+  return undefined;
+}
+
+/** Whether `path` is `dir` or inside it (both as given: resolve links first). */
+function inside(path: string, dir: string): boolean {
+  return path === dir || path.startsWith(dir.endsWith(sep) ? dir : dir + sep);
+}
+
+/** A folder's real path (links resolved), or the path itself when it is not there. */
+function realOr(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
 }
 
 /** Where a run begins: round 1 with everyone taking part, or — after the user answered a question — where the team stopped. */
@@ -1188,6 +1229,10 @@ export class Orchestrator {
         console.error('[orchestrator] run failed:', err);
         this.systemNote(conv, t().runFailed((err as Error).message));
       })
+      // While the run still holds its directory locks: what the agents changed in the copies of
+      // repositories they asked for goes onto each copy's branch.
+      .then(() => (run.designs ? undefined : this.commitCopies(conv)))
+      .catch((err) => console.error('[orchestrator] could not commit the copies:', err))
       .finally(() => {
         try {
           if (run.abort.signal.aborted) this.systemNote(conv, t().stoppedNote);
@@ -1303,6 +1348,177 @@ export class Orchestrator {
       pause: conv.pause,
       schedule: conv.schedule,
     });
+  }
+
+  // Folder requests ---------------------------------------------------------
+
+  /** The copies that are this conversation's own to remove: the ones in its folder under the data folder (a branch's are its origin's). */
+  private ownCopies(conv: Conversation, copies: readonly CwdCopy[]): CwdCopy[] {
+    const own = join(DATA_DIR, 'worktrees', conv.id);
+    return copies.filter((c) => inside(c.tree, own));
+  }
+
+  /**
+   * What allowing a request for `path` changes besides adding its copy: the permission (read-only
+   * becomes edit when edit was asked), and the working directories that leave the conversation: the
+   * folder itself, which its copy replaces, and the ones edit mode refuses (Harness Relay's own
+   * folder), when the permission becomes edit.
+   */
+  private folderPlan(conv: Conversation, path: string, edit: boolean): { permission: Permission; drops: string[] } {
+    const permission: Permission = edit && conv.settings.permission === 'read-only' ? 'edit' : conv.settings.permission;
+    const raised = permission !== conv.settings.permission;
+    const options = agentFolderOptions(this.settings);
+    const drops = cwdsOf(conv.settings).filter(
+      (cwd) => sameFolder(cwd, path) || (raised && relayFolderRefusal({ permission, cwd }, options) !== undefined),
+    );
+    return { permission, drops };
+  }
+
+  /** An agent's request for a folder, as the chat shows it until the user answers. */
+  private folderRequest(conv: Conversation, ask: FolderAsk): Extract<MessagePart, { type: 'folder' }> {
+    // As the agent wrote it: `~` is the home folder, a relative path is from where it runs.
+    const path = /^~($|[\\/])/.test(ask.path) || isAbsolute(ask.path) ? expandPath(ask.path) : resolve(conv.settings.cwd, ask.path);
+    const { drops } = this.folderPlan(conv, path, ask.edit);
+    return { type: 'folder', path, ...(ask.edit ? { edit: true } : {}), ...(drops.length ? { drops } : {}), status: 'pending' };
+  }
+
+  /**
+   * The user's answer to an agent's request for a folder. Allowed: Harness Relay makes a copy of the
+   * folder's repository (a git worktree on a new branch, under the data folder), which takes the
+   * folder's place among the working directories or joins them, and a read-only conversation becomes
+   * edit when edit was asked. Either way the agent is told, as the user's reply to its question, and
+   * the team picks up where it stopped.
+   */
+  async answerFolder(convId: string, messageId: string, answer: FolderAnswer): Promise<void> {
+    const reply = await this.exclusive(convId, t().busySettings, async () => {
+      const conv = this.store.get(convId);
+      if (!conv) throw new HttpError(404, t().conversationNotFound);
+      const index = conv.messages.findIndex((m) => m.id === messageId);
+      const msg = conv.messages[index];
+      const part = msg?.parts.find((p) => p.type === 'folder');
+      // Only while the team waits for this agent's answer: a reply the user typed meanwhile answered it.
+      const waiting =
+        msg?.author.kind === 'agent' &&
+        conv.pause?.askers.includes(msg.author.agentId) &&
+        !conv.messages.slice(index + 1).some((m) => m.author.kind === 'user');
+      if (!msg || part?.type !== 'folder' || part.status !== 'pending' || !waiting) throw new HttpError(404, t().approvalNotFound);
+      let text: string;
+      if (answer.allow) {
+        const before = conv.settings.permission;
+        const copy = await this.allowFolder(conv, part);
+        part.status = 'allowed';
+        part.copy = copy.path;
+        part.branch = copy.branch;
+        text = (conv.settings.permission !== before ? t().folderAllowedEdit : t().folderAllowed)(copy.path, copy.of, copy.branch);
+      } else {
+        const note = answer.note ? String(answer.note).trim().slice(0, 2000) : '';
+        part.status = 'denied';
+        if (note) part.note = note;
+        text = t().folderDenied(part.path, note || undefined);
+      }
+      this.store.saveMessage(conv.id, msg, true);
+      this.hub.emit(conv.id, { type: 'message', message: msg });
+      this.store.saveMeta(conv);
+      this.emitConversation(conv);
+      return text;
+    });
+    await this.send(convId, reply);
+  }
+
+  /**
+   * Make the copy a request asks for and put it among the conversation's working directories (see
+   * `answerFolder`). Everything is checked before anything is made; a folder that is one of the
+   * conversation's copies already, or in one, gets no second copy.
+   */
+  private async allowFolder(conv: Conversation, part: Extract<MessagePart, { type: 'folder' }>): Promise<CwdCopy> {
+    let dir: string;
+    try {
+      if (!statSync(part.path).isDirectory()) throw new Error('not a folder');
+      dir = realpathSync(part.path);
+    } catch {
+      throw new HttpError(404, t().folderMissing(part.path));
+    }
+    const { permission, drops } = this.folderPlan(conv, dir, Boolean(part.edit));
+    const copies = conv.settings.copies ?? [];
+    // Asked for a copy the conversation has (or a folder in it): that copy, as it is.
+    const within = copies.find((c) => inside(dir, realOr(c.tree)));
+    const root = within ? within.root : await repoRoot(dir);
+    if (!root) throw new HttpError(400, t().folderNotRepo(dir));
+    if (tooBroadRepo(root)) throw new HttpError(400, t().repoTooBroad(root));
+    // One worktree for each repository: another folder of the same one is a folder of that worktree.
+    const sibling = within ?? copies.find((c) => c.root === root);
+    const base = sibling ? undefined : await headCommit(root);
+    if (!sibling && !base) throw new HttpError(400, t().folderNoCommit(root));
+    const tree = sibling ? sibling.tree : join(DATA_DIR, 'worktrees', conv.id, `copy-${createHash('sha256').update(root).digest('hex').slice(0, 8)}`);
+    const path = within ? dir : worktreeDir(root, dir, tree);
+    const had = copies.find((c) => sameFolder(c.path, path));
+    // A branch of its own: never one the repository has (an agent's of that name in parallel mode, say).
+    const name = `relay/${conv.id.slice(0, 8)}/${branchSlug(basename(root))}`;
+    let branch = sibling?.branch ?? name;
+    if (!sibling) for (let n = 2; await branchExists(root, branch); n++) branch = `${name}-${n}`;
+    const copy: CwdCopy = had ?? { path, of: within ? within.of : dir, root, tree, branch };
+
+    // The copy takes the folder's own place; what edit mode refuses leaves; the copy joins otherwise.
+    const dirs: string[] = [];
+    for (const cwd of cwdsOf(conv.settings)) {
+      const next = sameFolder(cwd, dir) ? copy.path : drops.includes(cwd) ? undefined : cwd;
+      if (next && !dirs.some((d) => sameFolder(d, next))) dirs.push(next);
+    }
+    if (!dirs.some((d) => sameFolder(d, copy.path))) dirs.push(copy.path);
+    if (dirs.length > MAX_CWDS) throw new HttpError(400, t().tooManyCwds(MAX_CWDS));
+    const { extraCwds: _extra, copies: _copies, ...rest } = conv.settings;
+    const kept = [...copies.filter((c) => c !== had && dirs.some((d) => sameFolder(d, c.path))), copy];
+    const next: ConversationSettings = { ...rest, ...cwdSettings(dirs), permission, copies: kept };
+    const refused = relayFolderRefusal(next, agentFolderOptions(this.settings));
+    if (refused) throw new HttpError(400, refused);
+
+    if (!sibling) await createWorktree(root, tree, branch, base!);
+    try {
+      mkdirSync(copy.path, { recursive: true });
+      await this.prepareWorkspace({ ...conv, settings: next });
+    } catch (err) {
+      if (!sibling) await removeWorktree(root, tree, branch).catch(() => {});
+      throw err;
+    }
+    conv.settings = next;
+    return copy;
+  }
+
+  /**
+   * Settings about to replace the conversation's (the team drawer's): they keep its copies that are
+   * still among the working directories, and the worktrees of the others are removed (their branches
+   * stay, with what was committed to them).
+   */
+  async retainCopies(conv: Conversation, next: ConversationSettings): Promise<void> {
+    const copies = conv.settings.copies ?? [];
+    const dirs = cwdsOf(next);
+    const kept = copies.filter((c) => dirs.some((d) => sameFolder(d, c.path)));
+    if (kept.length) next.copies = kept;
+    else delete next.copies;
+    const gone = this.ownCopies(conv, copies).filter((c) => !kept.some((k) => k.tree === c.tree));
+    for (const tree of new Set(gone.map((c) => c.tree))) {
+      await removeWorktree(gone.find((c) => c.tree === tree)!.root, tree).catch((err) =>
+        console.warn('[orchestrator] copy cleanup failed:', (err as Error).message),
+      );
+    }
+  }
+
+  /**
+   * Commit what changed in the conversation's copies to their branches (when a run ends): the result
+   * of the agents' work is a branch of the repository they asked for, which the user pushes.
+   */
+  private async commitCopies(conv: Conversation): Promise<void> {
+    if (this.deleting.has(conv.id) || this.store.get(conv.id) !== conv) return;
+    const done = new Set<string>();
+    for (const copy of conv.settings.copies ?? []) {
+      if (done.has(copy.tree) || !existsSync(copy.tree)) continue;
+      done.add(copy.tree);
+      try {
+        if (await commitCopy(copy.tree, `Harness Relay: ${conv.title}`)) this.systemNote(conv, t().copyCommitted(copy.branch, copy.root));
+      } catch (err) {
+        this.systemNote(conv, t().copyCommitFailed(copy.branch, (err as Error).message));
+      }
+    }
   }
 
   // Workspace ---------------------------------------------------------------
@@ -1852,6 +2068,14 @@ export class Orchestrator {
         console.warn('[orchestrator] worktree cleanup failed:', (err as Error).message),
       );
     }
+    // The copies of repositories agents asked for: their worktrees go, their branches stay (the
+    // user's results). After the agents' worktrees above, which may be worktrees of a copy.
+    const copies = this.ownCopies(conv, conv.settings.copies ?? []);
+    for (const tree of new Set(copies.map((c) => c.tree))) {
+      await removeWorktree(copies.find((c) => c.tree === tree)!.root, tree).catch((err) =>
+        console.warn('[orchestrator] copy cleanup failed:', (err as Error).message),
+      );
+    }
     rmSync(join(DATA_DIR, 'worktrees', conv.id), { recursive: true, force: true });
     removeAttachments(conv.id);
     const cwdRoots = await Promise.all(cwdsOf(conv.settings).map((cwd) => repoRoot(cwd).catch(() => null)));
@@ -1859,6 +2083,8 @@ export class Orchestrator {
       ...worktrees.map((w) => w.root),
       ...conv.messages.flatMap((m) => (m.changes ?? []).map((c) => c.root)),
       ...cwdRoots.filter((r): r is string => Boolean(r)),
+      // A copy kept its snapshot refs in the repository it is a worktree of.
+      ...copies.map((c) => c.root),
     ]);
     for (const root of roots) {
       await dropKeptCommits(root, conv.id).catch((err) =>
@@ -2422,6 +2648,12 @@ export class Orchestrator {
         }
       }
       if (takeAsk(msg)) msg.asked = true;
+      // A request for a folder waits for the user as a question does, with a card to answer it on.
+      const folder = takeFolderAsk(msg);
+      if (folder) {
+        msg.parts.push(this.folderRequest(conv, folder));
+        msg.asked = true;
+      }
       const text = textOf(msg);
       msg.passed = isPass(text) || (!text && !msg.parts.some((p) => p.type === 'tool'));
       msg.status = 'done';

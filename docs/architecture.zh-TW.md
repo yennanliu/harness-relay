@@ -511,6 +511,20 @@ Cursor 和 Grok 不同，任何一類都沒有開關，連它從其他 CLI 的�
 
 首席 agent 會知道每個資料夾，並讀取每個 CLI 在第一個資料夾（CLI 開始的地方）自己會載入的東西，Claude Code 也和執行時一樣以 `--add-dir` 取得其他資料夾（它也會載入其中的 skill；**設定** 中預設工作目錄的清單也一樣）；Grok 的信任也以第一個為準。
 
+### agent 要求使用的 repository
+
+權限低於「完整存取」的 agent，可以直接在對話裡要求使用一個不在工作目錄內的 git repository，或要求它沒有的編輯權限，而不是請使用者去改設定：它的 briefing 要它在回覆結尾寫 `[ASK_FOLDER <路徑>]`，或 `[ASK_FOLDER <路徑> edit]`（`FOLDER_TOKEN`，`src/shared/ask.ts` 的 `splitFolderAsk()`；`~` 或相對路徑會依 agent 所寫的來解析）。`turn()` 會把標記從回覆中拿掉，在訊息加上一個 `folder` part（路徑、是否要求編輯，以及會離開對話的工作目錄：`folderPlan()`），並把這則回覆標成提問，所以這次執行會像 `[ASK_USER]` 一樣停下來（`RunPause`），側邊欄顯示**等你回答**。對話把這個 part 畫成一張卡片，有**允許，建立副本**與**拒絕**（`MessageItem.tsx` 的 `FolderCard`；允許會改變什麼，見 `src/web/chat.ts` 的 `folderEffects()`）。
+
+`POST /api/conversations/:id/messages/:messageId/folder` 用來回答（`Orchestrator.answerFolder()`），期間對話會像修改設定時一樣被保留，而且只有在團隊還在等那個 agent 時才能回答（使用者若已改用文字回覆，就算回答過了：404）。
+
+- **允許**（`allowFolder()`）：先檢查完所有條件才動手。資料夾必須存在（404）、位於 git repository 內（不會替它建立）、repository 不能以家目錄或檔案系統根目錄為根，而且至少要有一個 commit；工作目錄不能超過 `MAX_CWDS`。接著 Harness Relay 建立一份**副本**：該 repository 的 git worktree，位於 `data/worktrees/<對話>/copy-<root 的 8 位 hex>`，使用新分支 `relay/<對話前 8 碼>/<資料夾名稱>`（repository 已有同名分支時加上 `-2`、`-3`…），從 repository 的最後一個 commit（`HEAD`，不是 snapshot：使用者尚未提交的修改不會出現在他可能發佈的分支上）開始。所要求的資料夾在副本裡的對應位置會加入工作目錄（`ConversationSettings.copies`，每個是一個 `CwdCopy`：`path`、`of`、`root`、`tree`、`branch`；欄位 `cwd_copies`）。同一個 repository 在一個對話裡只有一份副本：它的另一個資料夾就是同一個 worktree 裡的資料夾。
+- **權限**：要求了編輯而對話是唯讀時，權限會改成可編輯，而且適用於所有工作目錄（卡片會列出是哪些）。此時「可編輯」不接受的工作目錄（`relayFolderRefusal()`：例如 Harness Relay 自己的資料夾，也就是從它的 checkout 啟動的伺服器的預設工作目錄）會離開對話；如果要求的就是某個工作目錄，副本會取代它的位置（part 的 `drops`，顯示在卡片上）。
+- **拒絕**：什麼都不變。
+
+不論哪一種，答案都會以使用者的回覆貼出（`i18n.ts` 的 `folderAllowed`、`folderAllowedEdit`、`folderDenied`，並附上使用者的說明），所以提出要求的 agent 先回答，團隊再從停下的地方繼續（`takePause()`）。briefing 會列出每份副本、它是什麼的副本與它的分支（`prompt.ts` 的 `copyRules()`）：在副本裡工作、不要更動原本的資料夾，而且被 git 忽略的檔案（相依套件、`.env`）不在裡面。
+
+副本和其他工作目錄一樣（每一輪前後的 snapshot、目錄鎖、平行模式下每個 agent 各有一個 worktree）。每次執行結束、放開目錄鎖之前，Harness Relay 會把每份副本裡的變更提交到它的分支（`commitCopies()`，`workspace.ts` 的 `commitCopy()`：使用使用者自己的 git 身分，沒有設定時才用 Harness Relay 的；訊息是 `Harness Relay: <對話標題>`），並在對話裡用一則備註寫出分支名稱。repository 自己的 checkout、index 與分支都不會被更動：成果是一個分支，由使用者決定是否發佈。副本的 worktree 會隨對話刪除，或在使用者把它的資料夾從工作目錄移除時刪除（`retainCopies()`）；分支會保留。從這個對話分支出去的對話，或排程開啟的新對話，仍把副本當成工作目錄，但並不擁有它（只有 `data/worktrees/` 下的資料夾裡放著它的那個對話會刪除它）。
+
 ## 瀏覽檔案
 
 對話上方的 **檔案** 會開啟對話工作目錄（每一個）的瀏覽器，平行模式下也能看每位成員的 worktree（`src/server/files.ts`；`GET /api/conversations/:id/files`、`…/files/preview`、`…/files/raw`、`…/files/download`）。路徑會以所選資料夾的實際路徑解析並跟隨符號連結；最後落在資料夾外或 `.git` 資料夾內的（比對時不分大小寫：在 macOS 與 Windows 上 `.GIT/config` 會開到 `.git/config`）都是 404，指向外面的連結不會出現在列表中。一個資料夾最多列出 2,000 項（依顯示順序的前面幾項）。經由資料夾內的連結進入的資料夾，會保留當初要求的路徑。預覽以 JSON 回傳文字（長檔案只回傳前 512 KB）；圖片與影片只標示類型，由瀏覽器從 `…/files/raw` 載入，這個端點只提供這些媒體類型，並帶有和媒體端點相同的 `nosniff` 與沙箱化 `Content-Security-Policy` 標頭。**下載** 會從 `…/files/download` 存下任何檔案，提供方式和回覆中連結的檔案相同（見[安全性](#安全性)）。資料夾（包括最上層）會從 `…/files/zip` 下載成 ZIP 檔：`zipPlan()` 取瀏覽時列出的同樣項目——不含 `.git`、只跟隨指向最上層裡面的連結、每個資料夾只放一次（所以繞回去的連結會略過）——放在以資料夾命名的資料夾裡；`zipStream()`（`src/server/zip.ts`，不需要額外套件）邊讀邊以 deflate 壓縮每個檔案、邊送出壓縮檔，使用 UTF-8 檔名、data descriptor 與每個檔案的權限，不論下載怎麼結束都會關閉開著的檔案。檔名會處理成任何解壓縮工具都安全的形式（`safeName()`：只有 `/` 是分隔符號，所以檔名裡的 `\`、`..`、磁碟代號的 `:` 或控制字元都會變成 `_`）。一個資料夾的檔案與資料夾合計最多 10,000 個、壓縮前 1 GB（`FILE_LIMITS`；走訪不會卡住伺服器，一超過就停止），因此不需要 ZIP64 就能低於 ZIP 的 4 GB 與 65,535 個項目。成員 worktree 的最上層以工作目錄和成員命名。介面會先問 `…/files/zip/check`：整個太大的資料夾，若在 git repository 裡，會提議只包沒被 git 忽略的檔案（`git ls-files --cached --others --exclude-standard`，`unignored=1`；裡面的其他 repository 與 submodule 也用同樣方式列出），所以含 `node_modules` 的專案仍然可以下載；否則就說明資料夾太大（下載本身會回 413）。介面用 highlight.js 為程式碼上色（輸出是包在 `<span>` 裡的跳脫文字），Markdown 則用聊天室的渲染器，所以預覽的檔案也無法執行腳本或載入遠端內容。
@@ -542,7 +556,7 @@ Cursor 和 Grok 不同，任何一類都沒有開關，連它從其他 CLI 的�
 
 | 資料表 | 內容 |
 | --- | --- |
-| `conversations` | id、標題、時間、模式、輪數、接力上限、權限、工作目錄、`extra_cwds`（之後的工作目錄，JSON；NULL 代表沒有）、`auto_team`（首席 agent 為每個新問題設計團隊）、`auto_confirm`（直接採用它的團隊、不必確認）、`approvals`（`deny` 代表自動拒絕）、`allow_rules`（JSON）、`group_id`（側邊欄群組；NULL 代表「其他」）、`group_source`（`user` 或 `auto`；NULL 代表尚未分類）與 `branch`（JSON：從哪個對話分支出來，以及最後一則複製的訊息；schema 版本 17） |
+| `conversations` | id、標題、時間、模式、輪數、接力上限、權限、工作目錄、`extra_cwds`（之後的工作目錄，JSON；NULL 代表沒有）、`cwd_copies`（屬於 agent 所要求 repository 副本的工作目錄，JSON；NULL 代表沒有；schema 第 28 版）、`auto_team`（首席 agent 為每個新問題設計團隊）、`auto_confirm`（直接採用它的團隊、不必確認）、`approvals`（`deny` 代表自動拒絕）、`allow_rules`（JSON）、`group_id`（側邊欄群組；NULL 代表「其他」）、`group_source`（`user` 或 `auto`；NULL 代表尚未分類）與 `branch`（JSON：從哪個對話分支出來，以及最後一則複製的訊息；schema 版本 17） |
 | `conversation_groups` | 使用者的側邊欄群組（名稱、順序） |
 | `conversation_agents` | 每個對話的團隊成員與順序（名稱、provider、角色、模型、推理強度、`tools`：成員對工具庫的例外設定，JSON；`account`：成員使用的 CLI 帳號，NULL 表示預設帳號，schema 版本 19） |
 | `messages` | 每則訊息一列（作者、狀態、是否 pass、錯誤、輪次、耗時、費用、token、該回合修改的 commit、存成 JSON 的團隊設計 `plan`，以及是否在佇列中等過、是否向使用者提問、是否由排程送出：`queued`、`asked`、`scheduled`），依 `seq` 排序 |

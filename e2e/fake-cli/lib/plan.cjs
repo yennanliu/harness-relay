@@ -23,6 +23,8 @@ const DIRECTIVES = {
   write: 'write the file named (relative to the working directory)',
   writeother: 'write the file named in the first other working directory the CLI was given (none: it says so)',
   ask: 'end the reply with a question for the user ([ASK_USER])',
+  folder: 'end the reply asking for the folder given ([ASK_FOLDER <path>])',
+  folderedit: 'end the reply asking for the folder given with edit access ([ASK_FOLDER <path> edit])',
   handoff: 'mention the member named, to hand the floor to it (not when that member is speaking)',
   slow: 'stream the reply slowly, about ten seconds (`=<seconds>` for another time), to be stopped or waited for',
   fail: 'exit with an error on stderr',
@@ -187,6 +189,8 @@ function plan(prompt, turn) {
   }
   if (typeof d.handoff === 'string' && d.handoff.toLowerCase() !== me.toLowerCase()) text += ` @${d.handoff}, over to you.`;
   if (d.ask) text += '\n\nWhich option do you prefer, A or B? [ASK_USER]';
+  if (typeof d.folder === 'string') text += `\n\nI need that repository to go on.\n\n[ASK_FOLDER ${d.folder}]`;
+  if (typeof d.folderedit === 'string') text += `\n\nI need to change files in that repository.\n\n[ASK_FOLDER ${d.folderedit} edit]`;
   steps.push({ type: 'text', text, slow: slowMs(d.slow) });
   return steps;
 }

@@ -12,6 +12,7 @@ import {
   draftStatus,
   enterSends,
   focusBoxAfterAnswer,
+  folderEffects,
   FOLLOW_AGAIN,
   followsAfterScroll,
   isPathDetail,
@@ -373,6 +374,36 @@ describe('creating a missing working directory', () => {
     });
     await expect(orCreateCwd(refused, () => false)).rejects.toBe(missing);
     expect(refused).toHaveBeenCalledOnce();
+  });
+});
+
+describe("an agent's request for a folder", () => {
+  const part = (over: Partial<Extract<MessagePart, { type: 'folder' }>> = {}): Extract<MessagePart, { type: 'folder' }> => ({
+    type: 'folder',
+    path: '/home/me/api',
+    status: 'pending',
+    ...over,
+  });
+
+  it('is a block of its own among the message\'s parts', () => {
+    const segs = segments([{ type: 'text', text: 'I need the API repository.' }, part({ edit: true })]);
+    expect(segs.map((s) => s.kind)).toEqual(['text', 'folder']);
+    expect(segs[1]).toMatchObject({ kind: 'folder', key: 1, part: { path: '/home/me/api', edit: true } });
+  });
+
+  it('says what allowing it changes besides adding the copy', () => {
+    const readOnly = { permission: 'read-only' as const, cwd: '/work', extraCwds: ['/docs', '/relay'] };
+    // Edit asked in a read-only chat: it becomes edit, for the folders that stay too.
+    expect(folderEffects(part({ edit: true, drops: ['/relay'] }), readOnly)).toEqual({ raises: true, drops: ['/relay'], alsoEditable: ['/work', '/docs'] });
+    // No edit asked, or a chat that is edit already: the permission stays.
+    expect(folderEffects(part(), readOnly)).toEqual({ raises: false, drops: [], alsoEditable: [] });
+    expect(folderEffects(part({ edit: true }), { permission: 'edit', cwd: '/work' })).toEqual({ raises: false, drops: [], alsoEditable: [] });
+    // Its own folder: the copy takes its place, and nothing else becomes editable.
+    expect(folderEffects(part({ path: '/work', edit: true, drops: ['/work'] }), { permission: 'read-only', cwd: '/work' })).toEqual({
+      raises: true,
+      drops: ['/work'],
+      alsoEditable: [],
+    });
   });
 });
 

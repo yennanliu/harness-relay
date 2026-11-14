@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -13,6 +14,7 @@ import {
   SHARE_FILE_URL_MAX,
   SHARE_MAX_BYTES,
   DEFAULT_LIMITS,
+  type ChatMessage,
   type Conversation,
   type ConversationSummary,
   type ProviderModels,
@@ -1173,6 +1175,129 @@ describe('a team design waiting for confirmation', () => {
     const fixed = await createConversation({ permission: 'read-only' });
     const on = await app.request(`/api/conversations/${fixed.id}`, json('PATCH', { settings: { ...fixed.settings, autoTeam: true } }));
     expect(((await on.json()) as Conversation).settings.autoTeam).toBeUndefined();
+  });
+});
+
+describe('POST /api/conversations/:id/messages/:messageId/folder', () => {
+  const sh = (cwd: string, ...args: string[]) =>
+    execFileSync('git', ['-c', 'user.name=Test User', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8' }).trim();
+
+  /** A repository outside the working directories, with one commit. */
+  function otherRepo(): string {
+    const dir = join(root, `other-${n}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'README.md'), 'other\n');
+    sh(dir, 'init', '-q');
+    sh(dir, 'add', '-A');
+    sh(dir, 'commit', '-q', '-m', 'first');
+    return dir;
+  }
+
+  /** A read-only conversation whose agent asked for `path` with edit access, and waits for the answer. */
+  async function asked(path: string, cwd = project): Promise<Conversation> {
+    const created = await createConversation({ permission: 'read-only', cwd });
+    const conv = store.get(created.id)!;
+    const agentId = conv.agents[0]!.id;
+    const question: ChatMessage = { id: 'u1', author: { kind: 'user' }, createdAt: 1, parts: [{ type: 'text', text: 'fix the other repository' }], status: 'done' };
+    const ask: ChatMessage = {
+      id: 'ask',
+      author: { kind: 'agent', agentId },
+      agentName: 'Alice',
+      provider: 'claude',
+      createdAt: 2,
+      parts: [
+        { type: 'text', text: 'I need the other repository.' },
+        { type: 'folder', path, edit: true, status: 'pending' },
+      ],
+      status: 'done',
+      asked: true,
+    };
+    conv.messages.push(question, ask);
+    store.saveMessage(conv.id, question, true);
+    store.saveMessage(conv.id, ask, true);
+    conv.pause = { mode: 'roundtable', askers: [agentId], rest: [], participants: [agentId], round: 1, rounds: 1 };
+    store.saveMeta(conv);
+    return conv;
+  }
+  const answer = (conv: Conversation, body: unknown, messageId = 'ask') =>
+    app.request(`/api/conversations/${conv.id}/messages/${messageId}/folder`, json('POST', body, { 'x-relay-lang': 'en' }));
+  const folderPart = (conv: Conversation) => store.get(conv.id)!.messages.flatMap((m) => m.parts).find((p) => p.type === 'folder');
+
+  it('denies: nothing changes, and the agent gets the answer as the user\'s reply', async () => {
+    const other = otherRepo();
+    const conv = await asked(other);
+    const res = await answer(conv, { allow: false, note: 'describe it instead' });
+    expect(res.status).toBe(200);
+    expect(folderPart(conv)).toMatchObject({ status: 'denied', note: 'describe it instead' });
+    expect(store.get(conv.id)!.settings).toMatchObject({ permission: 'read-only', cwd: project });
+    await vi.waitFor(() => expect(orchestrator.isRunning(conv.id)).toBe(true));
+    const reply = store.get(conv.id)!.messages.at(-2)!;
+    expect(reply).toMatchObject({ author: { kind: 'user' }, parts: [{ type: 'text', text: `Not allowed to use ${other}. describe it instead` }] });
+    orchestrator.stop(conv.id);
+    await vi.waitFor(() => expect(orchestrator.isRunning(conv.id)).toBe(false));
+    // Answered: not again.
+    expect((await answer(conv, { allow: true })).status).toBe(404);
+  });
+
+  it('allows only on `allow: true`, and answers 404 for a message that asks for nothing', async () => {
+    const other = otherRepo();
+    const conv = await asked(other);
+    expect((await answer(conv, { allow: true }, 'u1')).status).toBe(404);
+    expect((await answer(conv, { allow: true }, 'nope')).status).toBe(404);
+    expect((await app.request(`/api/conversations/none/messages/ask/folder`, json('POST', { allow: true }))).status).toBe(404);
+    // Anything but `true` denies.
+    expect((await answer(conv, { allow: 'yes' })).status).toBe(200);
+    expect(folderPart(conv)).toMatchObject({ status: 'denied' });
+    orchestrator.stop(conv.id);
+    await vi.waitFor(() => expect(orchestrator.isRunning(conv.id)).toBe(false));
+  });
+
+  it("allows in a chat on Harness Relay's own folder: the chat moves to the copy, where edit mode is allowed", async () => {
+    const { RELAY_ROOT } = await import('../src/server/protect');
+    const other = otherRepo();
+    const conv = await asked(other, RELAY_ROOT);
+    const res = await answer(conv, { allow: true });
+    expect(res.status).toBe(200);
+    const now = store.get(conv.id)!;
+    const [copy] = now.settings.copies!;
+    expect(copy).toMatchObject({ of: other, root: other });
+    // Harness Relay's own folder left the chat: edit mode refuses it.
+    expect(now.settings).toMatchObject({ permission: 'edit', cwd: copy!.path });
+    expect(now.settings.extraCwds).toBeUndefined();
+    expect(folderPart(conv)).toMatchObject({ status: 'allowed', copy: copy!.path, branch: copy!.branch });
+    expect(readFileSync(join(copy!.path, 'README.md'), 'utf8')).toBe('other\n');
+    await vi.waitFor(() => expect(orchestrator.isRunning(conv.id)).toBe(true));
+    expect(now.messages.at(-2)).toMatchObject({
+      author: { kind: 'user' },
+      parts: [{ type: 'text', text: expect.stringContaining(`Allowed, and the file permission is now "edit". Work in ${copy!.path}`) }],
+    });
+    // The fake CLI wrote its file in the copy.
+    await vi.waitFor(() => expect(existsSync(join(copy!.path, 'out.txt'))).toBe(true));
+    orchestrator.stop(conv.id);
+    await vi.waitFor(() => expect(orchestrator.isRunning(conv.id)).toBe(false));
+    expect(existsSync(join(other, 'out.txt'))).toBe(false);
+    // The run's end committed it to the copy's branch.
+    await vi.waitFor(() => expect(sh(other, 'show', `${copy!.branch}:out.txt`)).toBe('x'));
+
+    // Saving the team's settings keeps the copy; taking it out of the working directories removes it.
+    const keep = await app.request(`/api/conversations/${conv.id}`, json('PATCH', { settings: { ...now.settings, rounds: 2 } }));
+    expect(keep.status).toBe(200);
+    expect(store.get(conv.id)!.settings.copies).toEqual([copy]);
+    const drop = await app.request(`/api/conversations/${conv.id}`, json('PATCH', { settings: { ...now.settings, cwd: project, extraCwds: [] } }));
+    expect(drop.status).toBe(200);
+    expect(store.get(conv.id)!.settings.copies).toBeUndefined();
+    expect(existsSync(copy!.tree)).toBe(false);
+    expect(sh(other, 'show', `${copy!.branch}:out.txt`)).toBe('x');
+  });
+
+  it('says why a folder cannot be copied', async () => {
+    const plain = join(root, `plain-${n}`);
+    mkdirSync(plain, { recursive: true });
+    const conv = await asked(plain);
+    const res = await answer(conv, { allow: true });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: expect.stringMatching(/is not in a git repository/) });
+    expect(folderPart(conv)).toMatchObject({ status: 'pending' });
   });
 });
 

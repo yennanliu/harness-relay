@@ -1033,6 +1033,8 @@ export function createApp({
       if (conv.settings.autoTeam) next.autoTeam = true;
       else delete next.autoTeam;
       if (b.settings) await orchestrator.prepareWorkspace({ ...conv, settings: next });
+      // Its copies of repositories agents asked for stay while they are working directories.
+      await orchestrator.retainCopies(conv, next);
       conv.agents = agents;
       conv.settings = next;
       if (b.agents) confirmed = orchestrator.confirmPendingPlan(conv);
@@ -1415,6 +1417,18 @@ export function createApp({
   app.post('/api/conversations/:id/approvals/:approvalId', async (c) => {
     const b = await body<ApprovalAnswer>(c);
     orchestrator.answerApproval(c.req.param('id'), c.req.param('approvalId'), b);
+    return c.json({ ok: true });
+  });
+
+  // Answer an agent's request for a folder outside the working directories (`[ASK_FOLDER …]`): allowed,
+  // a copy of its repository (a git worktree on a new branch) joins the working directories, and the
+  // team goes on.
+  app.post('/api/conversations/:id/messages/:messageId/folder', async (c) => {
+    const b = await body<{ allow?: unknown; note?: unknown }>(c);
+    await orchestrator.answerFolder(c.req.param('id'), c.req.param('messageId'), {
+      allow: b.allow === true,
+      ...(typeof b.note === 'string' ? { note: b.note } : {}),
+    });
     return c.json({ ok: true });
   });
 

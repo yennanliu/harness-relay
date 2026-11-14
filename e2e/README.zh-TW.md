@@ -6,7 +6,7 @@
 
 它們如何運作、怎麼執行單一測試、怎麼撰寫新測試，見開發者說明的[端對端測試](../docs/developer-guide.zh-TW.md#端對端測試)。這一頁是情境清單：新增、修改或刪除端對端測試時，請在同一個 commit 裡一起修改這一頁與[英文版](README.md)（見 [AGENTS.md](../AGENTS.md) 的「Documentation」）。
 
-目前共有 31 個 spec 檔、386 個測試，在每個執行的瀏覽器中各跑一次（預設是 Chromium）。有些只在某些系統上執行，或只在 Harness Relay 自己的沙箱能運作的地方執行：見[平台與瀏覽器](#平台與瀏覽器)。
+目前共有 31 個 spec 檔、388 個測試，在每個執行的瀏覽器中各跑一次（預設是 Chromium）。有些只在某些系統上執行，或只在 Harness Relay 自己的沙箱能運作的地方執行：見[平台與瀏覽器](#平台與瀏覽器)。
 
 ## 執行
 
@@ -45,7 +45,7 @@ npx playwright test --ui                      # 在 Playwright 的視窗中挑�
 | [agent 回答前做了什麼](#agent-回答前做了什麼) | [`activity.spec.ts`](specs/activity.spec.ts) | 13 | [架構 → agent 活動](../docs/architecture.zh-TW.md#agent-活動) |
 | [核准](#核准) | [`approvals.spec.ts`](specs/approvals.spec.ts) | 39 | [使用者說明 → 核准](../docs/user-guide.zh-TW.md#核准)、[架構 → 核准](../docs/architecture.zh-TW.md#核准)、[權限對應](../docs/architecture.zh-TW.md#權限對應) |
 | [檔案與修改](#檔案與修改) | [`files.spec.ts`](specs/files.spec.ts) | 20 | [使用者說明 → 檢視與套用修改](../docs/user-guide.zh-TW.md#檢視與套用修改)、[瀏覽檔案](../docs/user-guide.zh-TW.md#瀏覽檔案)、[架構 → 工作區與檔案修改](../docs/architecture.zh-TW.md#工作區與檔案修改) |
-| [工作目錄與其他資料夾](#工作目錄與其他資料夾) | [`folders.spec.ts`](specs/folders.spec.ts) | 34 | [架構 → 多個工作目錄](../docs/architecture.zh-TW.md#多個工作目錄)、[各平台的作業系統沙箱](../docs/sandboxing.zh-TW.md) |
+| [工作目錄與其他資料夾](#工作目錄與其他資料夾) | [`folders.spec.ts`](specs/folders.spec.ts) | 36 | [架構 → 多個工作目錄](../docs/architecture.zh-TW.md#多個工作目錄)、[各平台的作業系統沙箱](../docs/sandboxing.zh-TW.md) |
 | [Harness Relay 自己的沙箱](#harness-relay-自己的沙箱) | [`sandbox.spec.ts`](specs/sandbox.spec.ts) | 17 | [各平台的作業系統沙箱 → Harness Relay 自己的沙箱](../docs/sandboxing.zh-TW.md#harness-relay-自己的沙箱)、[開源 agent → Harness Relay 的沙箱](../docs/open-agents.zh-TW.md#harness-relay-的沙箱) |
 | [除了 prompt 之外交給各 CLI 的東西](#除了-prompt-之外交給各-cli-的東西) | [`inputs.spec.ts`](specs/inputs.spec.ts) | 34 | [架構 → 工具庫](../docs/architecture.zh-TW.md#工具庫) |
 | [工具庫](#工具庫) | [`tools.spec.ts`](specs/tools.spec.ts) | 14 | [使用者說明 → 工具庫](../docs/user-guide.zh-TW.md#工具庫mcp-伺服器skill-與記憶)、[架構 → 工具庫](../docs/architecture.zh-TW.md#工具庫) |
@@ -209,6 +209,8 @@ npx playwright test --ui                      # 在 Playwright 的視窗中挑�
 | 新對話從設定中的預設工作目錄開始 | — | 在**設定 → 預設工作目錄**存下的資料夾，出現在下一個新對話的輸入框裡。 |
 | 選擇資料夾視窗加入在其中選的資料夾，對話在所有資料夾中開始 | 只在 Linux | **選擇資料夾…**（Choose folders…，假的 `zenity`）加入兩個資料夾；視窗開在最後一個資料夾裡，允許多選，標題是英文；新對話有這三個資料夾。 |
 | 在沒有 UTF-8 locale 的伺服器上，以中文開啟選擇資料夾視窗 | 只在 Linux | 視窗標題是中文，並帶 `LC_CTYPE=C.UTF-8`；按取消不會加入任何資料夾。 |
+| agent 要求使用對話資料夾以外的 repository，允許後拿到一份副本 | Claude Code | 在唯讀對話中用 `e2e:folderedit=<路徑>`：回覆顯示時沒有 `[ASK_FOLDER …]`，並有一張卡片寫出資料夾、說明會建立副本、對話會改成可編輯，以及 agent 之後還能修改哪個其他資料夾；側邊欄顯示**等你回答**（Answer needed）。**允許，建立副本**（Allow, make a copy）：對話的工作目錄多了該 repository 的副本（data 資料夾下的 git worktree，新分支，不含被 git 忽略的檔案）且變成可編輯，卡片寫出副本位置，agent 接著回答。之後它寫的檔案（`e2e:writeother`）在副本與它的分支裡，有一則備註寫出分支，repository 自己的 checkout 沒有變。 |
+| 拒絕對 repository 的要求時什麼都不變 | Claude Code | `e2e:folder=<路徑>`：卡片沒有提到權限；附說明按**拒絕**（Decline）：agent 的下一則回覆帶著說明，卡片也顯示它，對話仍是唯讀且資料夾不變，repository 沒有新分支。 |
 
 ## Harness Relay 自己的沙箱
 
@@ -527,7 +529,7 @@ npx playwright test --ui                      # 在 Playwright 的視窗中挑�
 - **首頁 logo 動畫的流暢度。**[首頁](#首頁)檢查它只動 `transform` 與 `opacity`、只播一次；它由 Chrome 的 compositor 執行、頁面畫好之後不再重新排版或繪製，則是在 Chrome 的 trace 中手動確認的。
 - **推播通知與系統本身的通知。**[通知與提示音](#通知與提示音)用替身記錄它們；推播需要真正的推播服務（Google、Apple 的…），所以伺服器這一端（訂閱、加密、簽章、送出與保留什麼）由單元測試涵蓋（`test/push.test.ts`、`test/alerts.test.ts`、`test/push-api.test.ts`），頁面這一端由 `test/alerts-web.test.ts` 涵蓋，service worker 的處理程序則以替身的 `self` 由 `test/sw.test.ts` 涵蓋；瀏覽器向推播服務訂閱、真正的推播送到手機，則沒有任何測試走過。
 - **OpenCode 與 Goose 的 token 和費用。** Harness Relay 從這兩個 CLI 自己的 SQLite 資料庫（`opencode.db`、`sessions.db`）讀取，它們的假 CLI 不保存這些資料庫，所以在這裡它們的回覆不顯示用量；轉接器的測試（`test/opencode.test.ts`、`test/goose.test.ts`）會對照真正 CLI 寫法寫成的資料庫跑完整的回合。
-- **還沒有 spec 走過的功能**：語音輸入本身的錄音與轉寫（它會下載引擎與模型，也需要麥克風；只測了安裝的面板）；分享的回答所連結的檔案，以及上傳回報的截圖（兩者都用 git 推送到 gist，假的 `gh` 沒有代替這部分）；作業系統金鑰儲存區中的 API key（測試會關掉它，所以 key 存在資料庫）；從設定登入 Codex、Grok、Cursor、Antigravity、Copilot 與 Muse Code（它們自己的登入流程；Copilot 的裝置登入由 `test/providers.test.ts` 測試），以及真正的 Codex 拿到 `codex login --with-api-key` 的 key 之後做了什麼；Copilot 沙箱的政策和這次執行設定的不一樣時，完全存取以外拒絕啟動（由 `test/copilot.test.ts` 測試）；Muse Code 詢問指令要不要連網（它的假 CLI 在沙箱中會為 `e2e:approve=publish` 詢問，但沒有 spec 送出這個指令），以及對話的權限改變或伺服器重新啟動後，Muse Code 的成員開新的 session（由 `test/muse.test.ts` 測試）；AgentsView 中首席 agent 與分類對話的 session 連結、設定網址後才送出的對話，以及 Harness Relay 為開源 agent 記下的成員 session（由 `test/agentsview.test.ts` 測試，Cursor 的也是，另有 spec 試過）；連不含 git 忽略的檔案都太大的 ZIP；以及桌面 app 視窗裡登入之後的部分（它自己的檢查 `desktop/scripts/smoke.ts` 與 `desktop/scripts/check-package.ts` 會開一個這些假 claude、codex 與 grok 的唯讀對話，讓每一個回答一個問題，在打包好的伺服器上與打包好的 app 裡都會跑：CI 在 Linux 與 Windows 上，發佈前則在每個系統上）。其中有些有單元測試，在 [`test/`](../test/) 裡，列在開發者說明的[測試](../docs/developer-guide.zh-TW.md#測試)。
+- **還沒有 spec 走過的功能**：由 Claude Code 以外的 CLI 提出的 repository 要求（標記只是回覆裡的文字，每個 CLI 都一樣）、平行模式下的要求，以及以 Harness Relay 自己的資料夾為工作目錄的對話在允許後移到副本（最後一項與各種拒絕由 `test/orchestrator-folder-request.test.ts` 與 `test/app.test.ts` 涵蓋）；語音輸入本身的錄音與轉寫（它會下載引擎與模型，也需要麥克風；只測了安裝的面板）；分享的回答所連結的檔案，以及上傳回報的截圖（兩者都用 git 推送到 gist，假的 `gh` 沒有代替這部分）；作業系統金鑰儲存區中的 API key（測試會關掉它，所以 key 存在資料庫）；從設定登入 Codex、Grok、Cursor、Antigravity、Copilot 與 Muse Code（它們自己的登入流程；Copilot 的裝置登入由 `test/providers.test.ts` 測試），以及真正的 Codex 拿到 `codex login --with-api-key` 的 key 之後做了什麼；Copilot 沙箱的政策和這次執行設定的不一樣時，完全存取以外拒絕啟動（由 `test/copilot.test.ts` 測試）；Muse Code 詢問指令要不要連網（它的假 CLI 在沙箱中會為 `e2e:approve=publish` 詢問，但沒有 spec 送出這個指令），以及對話的權限改變或伺服器重新啟動後，Muse Code 的成員開新的 session（由 `test/muse.test.ts` 測試）；AgentsView 中首席 agent 與分類對話的 session 連結、設定網址後才送出的對話，以及 Harness Relay 為開源 agent 記下的成員 session（由 `test/agentsview.test.ts` 測試，Cursor 的也是，另有 spec 試過）；連不含 git 忽略的檔案都太大的 ZIP；以及桌面 app 視窗裡登入之後的部分（它自己的檢查 `desktop/scripts/smoke.ts` 與 `desktop/scripts/check-package.ts` 會開一個這些假 claude、codex 與 grok 的唯讀對話，讓每一個回答一個問題，在打包好的伺服器上與打包好的 app 裡都會跑：CI 在 Linux 與 Windows 上，發佈前則在每個系統上）。其中有些有單元測試，在 [`test/`](../test/) 裡，列在開發者說明的[測試](../docs/developer-guide.zh-TW.md#測試)。
 
 ## 實機測試
 

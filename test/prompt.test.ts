@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentConfig, ChatMessage, Conversation } from '../src/shared/types';
 import { buildBriefing, buildTurnPrompt, canReadFiles, forwardText, isForwardable, isPass, parseMentions, renderMessage } from '../src/server/prompt';
-import { ASK_TOKEN, splitAsk } from '../src/shared/ask';
+import { ASK_TOKEN, FOLDER_TOKEN, splitAsk, splitFolderAsk, withoutAskMarkers } from '../src/shared/ask';
 
 const team: AgentConfig[] = [
   { id: 'b', name: 'Builder', provider: 'claude', role: '' },
@@ -268,6 +268,55 @@ describe('asking the user', () => {
     const relay = buildTurnPrompt(conv, team[0]!, [], false, { mode: 'relay', round: 1, rounds: 1, answered: true });
     expect(relay).toContain('Mention a teammate to hand off');
     expect(buildTurnPrompt(conv, team[0]!, [], false, { mode: 'roundtable', round: 1, rounds: 1 })).not.toContain('You asked');
+  });
+});
+
+describe('asking for a folder', () => {
+  it('finds the folder marker at the end of a reply, with its path and whether to edit', () => {
+    expect(splitFolderAsk('I need the API repository.\n\n[ASK_FOLDER /home/me/api edit]')).toEqual({
+      text: 'I need the API repository.',
+      folder: { path: '/home/me/api', edit: true },
+    });
+    expect(splitFolderAsk('Need it. [ASK_FOLDER /home/me/api]')).toEqual({ text: 'Need it.', folder: { path: '/home/me/api', edit: false } });
+    // Dressed up, in other letter case, with spaces in the path, quoted, or with a colon.
+    expect(splitFolderAsk('Need it.\n**[ask_folder: ~/My Projects/api EDIT]**.\n')).toEqual({
+      text: 'Need it.',
+      folder: { path: '~/My Projects/api', edit: true },
+    });
+    expect(splitFolderAsk('Need it.\n`[ASK_FOLDER "C:\\work\\api" edit]`').folder).toEqual({ path: 'C:\\work\\api', edit: true });
+    // A folder called "edit" is a path, not the word after one.
+    expect(splitFolderAsk('x [ASK_FOLDER /srv/edit]').folder).toEqual({ path: '/srv/edit', edit: false });
+  });
+
+  it('only counts the marker at the end, and only with a path', () => {
+    const middle = 'I would end with [ASK_FOLDER /x] if I needed one.';
+    expect(splitFolderAsk(middle)).toEqual({ text: middle });
+    expect(splitFolderAsk('Need it. [ASK_FOLDER  ]')).toEqual({ text: 'Need it. [ASK_FOLDER  ]' });
+    expect(splitFolderAsk('no marker')).toEqual({ text: 'no marker' });
+  });
+
+  it('hides either marker while a reply streams', () => {
+    expect(withoutAskMarkers('Which one?\n\n[ASK_USER]')).toBe('Which one?');
+    expect(withoutAskMarkers('Need it.\n\n[ASK_FOLDER /home/me/api edit]')).toBe('Need it.');
+    expect(withoutAskMarkers('plain')).toBe('plain');
+  });
+
+  it('tells agents below full access how to ask, and what a copy is', () => {
+    const readOnly = { ...conv, settings: { ...conv.settings, permission: 'read-only' as const } };
+    expect(buildBriefing(readOnly, team[0]!)).toContain(`end your reply with ${FOLDER_TOKEN} <absolute path>] on its own line`);
+    expect(buildBriefing(conv, team[0]!)).toContain(`${FOLDER_TOKEN} /home/me/project edit]`);
+    const full = { ...conv, settings: { ...conv.settings, permission: 'full' as const } };
+    expect(buildBriefing(full, team[0]!)).not.toContain(FOLDER_TOKEN);
+    expect(buildBriefing(conv, team[0]!)).not.toContain('is a copy of');
+
+    const copy = { path: '/data/worktrees/c/copy-1/src', of: '/home/me/api/src', root: '/home/me/api', tree: '/data/worktrees/c/copy-1', branch: 'relay/c/api' };
+    const withCopy = { ...conv, settings: { ...conv.settings, extraCwds: [copy.path], copies: [copy] } };
+    for (const ws of [undefined, { kind: 'isolated' as const, folders: [{ cwd: '/wt', userCwd: '/work', branch: 'b', base: 'abc' }], teammates: [] }]) {
+      const briefing = buildBriefing(withCopy, team[0]!, ws);
+      expect(briefing).toContain('- /data/worktrees/c/copy-1/src is a copy of /home/me/api/src (branch relay/c/api of the repository /home/me/api)');
+      expect(briefing).toContain('Do the work in the copy and leave the original folder as it is.');
+      expect(briefing).toContain('Harness Relay commits what changed in a copy to its branch when the team\'s run ends');
+    }
   });
 });
 

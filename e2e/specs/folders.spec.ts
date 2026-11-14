@@ -1,7 +1,8 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test } from '../fixtures';
-import { acceptNextDialog, chatId, finishedReply, openTeamChat, send } from '../support/app';
+import { acceptNextDialog, chatId, finishedReply, openTeamChat, replies, send, settled } from '../support/app';
 import { chatWith, CLIS, eachCli, endsTurnNote, member, needsBelowFull, writtenBy } from '../support/clis';
 
 /*
@@ -215,5 +216,82 @@ test.describe('the folder dialog', () => {
       expect(opened!.args).toContain('--title=選擇工作目錄');
       expect(opened!.env).toEqual({ LANG: 'C', LC_CTYPE: 'C.UTF-8' });
     });
+  });
+});
+
+test.describe('a repository an agent asks for in the chat', () => {
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync('git', ['-c', 'user.name=E2E', '-c', 'user.email=e2e@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8' }).trim();
+  type Copy = { path: string; of: string; root: string; tree: string; branch: string };
+  type Settings = { permission: string; cwd: string; extraCwds?: string[]; copies?: Copy[] };
+
+  /** A repository next to the chat's folder, with one commit and a file git ignores. */
+  function otherRepo(relay: { addProject(name: string): string }): string {
+    const other = realpathSync(relay.addProject('other'));
+    git(other, 'init', '-q');
+    execFileSync('node', ['-e', "require('fs').writeFileSync('.gitignore', '.env\\n'); require('fs').writeFileSync('.env', 'SECRET=1\\n')"], { cwd: other });
+    git(other, 'add', '-A');
+    git(other, 'commit', '-q', '-m', 'first');
+    return other;
+  }
+
+  test('Allow makes a copy on a new branch, the chat becomes edit, and what the agent writes goes to the branch only', async ({ page, relay }) => {
+    const other = otherRepo(relay);
+    const id = await openTeamChat(page, relay, [{ name: 'Claude', provider: 'claude' }]);
+    await send(page, `Fix the project next door e2e:folderedit=${other}`);
+    const asked = await finishedReply(page, 'Claude');
+    await expect(asked).toContainText('I need to change files in that repository.');
+    await expect(asked).not.toContainText('[ASK_FOLDER');
+    const card = page.getByRole('region', { name: '@Claude asks to change files in a folder outside the working directories' });
+    await expect(card.locator('.approval-detail')).toHaveText(other);
+    await expect(card).toContainText('Harness Relay makes a copy of this repository');
+    await expect(card).toContainText("This chat's file permission becomes “edit”.");
+    await expect(card).toContainText(`Agents can then also change files in this chat's other working directories: ${relay.workDir}`);
+    await expect(page.locator('.conv-item.active .conv-status')).toHaveText('Answer needed');
+    // The card is how it is answered: no "waiting for your answer" card beside it.
+    await expect(asked.locator('.ask-card')).toHaveCount(0);
+
+    await card.getByRole('button', { name: 'Allow, make a copy' }).click();
+    await expect(replies(page, 'Claude')).toHaveCount(2);
+    await expect(await finishedReply(page, 'Claude')).toContainText('Thanks, Claude got your answer');
+    const conv = await settled(relay, id);
+    const settings = conv.settings as Settings;
+    const [copy] = settings.copies!;
+    expect(copy).toMatchObject({ of: other, root: other });
+    expect(settings).toMatchObject({ permission: 'edit', cwd: relay.workDir, extraCwds: [copy!.path] });
+    // `asked` is the member's latest reply, which is the next one by now.
+    await expect(replies(page, 'Claude').first().locator('.approval-done.allowed')).toContainText(`Allowed: working in the copy ${copy!.path} (branch ${copy!.branch})`);
+    // The copy is the repository at its last commit, without what git ignores.
+    expect(existsSync(join(copy!.path, 'README.md'))).toBe(true);
+    expect(existsSync(join(copy!.path, '.env'))).toBe(false);
+
+    await send(page, 'Now write it e2e:writeother=made.txt');
+    await expect(replies(page, 'Claude')).toHaveCount(3);
+    await expect(await finishedReply(page, 'Claude')).toContainText('I wrote made.txt.');
+    await settled(relay, id);
+    expect(existsSync(join(copy!.path, 'made.txt'))).toBe(true);
+    // The repository's own checkout is as it was; the work is on the copy's branch.
+    expect(existsSync(join(other, 'made.txt'))).toBe(false);
+    expect(git(other, 'status', '--porcelain')).toBe('');
+    expect(git(other, 'show', `${copy!.branch}:made.txt`)).toContain('Written by Claude');
+    await expect(page.locator('.msg-system', { hasText: `Committed the changes in the copy to branch ${copy!.branch}` })).toBeVisible();
+  });
+
+  test('Decline changes nothing, and the agent is told why', async ({ page, relay }) => {
+    const other = otherRepo(relay);
+    const id = await openTeamChat(page, relay, [{ name: 'Claude', provider: 'claude' }]);
+    await send(page, `Look next door e2e:folder=${other}`);
+    await finishedReply(page, 'Claude');
+    const card = page.getByRole('region', { name: '@Claude asks to use a folder outside the working directories' });
+    await expect(card).not.toContainText('file permission becomes');
+    await card.getByPlaceholder('Tell it what to do instead (optional, when declining)').fill('describe the change instead');
+    await card.getByRole('button', { name: 'Decline' }).click();
+    await expect(replies(page, 'Claude')).toHaveCount(2);
+    await expect(await finishedReply(page, 'Claude')).toContainText(`Not allowed to use ${other}. describe the change instead`);
+    await expect(replies(page, 'Claude').first().locator('.approval-done.denied')).toContainText('describe the change instead');
+    const settings = (await settled(relay, id)).settings as Settings;
+    expect(settings).toMatchObject({ permission: 'read-only', cwd: relay.workDir });
+    expect(settings.copies).toBeUndefined();
+    expect(git(other, 'branch', '--list', 'relay/*')).toBe('');
   });
 });
