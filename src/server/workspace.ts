@@ -409,12 +409,15 @@ export async function branchExists(root: string, branch: string): Promise<boolea
  * `.`, `_`, `-`), not starting with `.` or `-` nor ending in `.` or `.lock`; `repo` when nothing is left.
  */
 export function branchSlug(name: string): string {
-  const slug = name
+  let slug = name
     .replace(/[^A-Za-z0-9._-]+/g, '-')
     .replace(/\.{2,}/g, '.')
-    .replace(/^[.-]+|[.-]+$/g, '')
-    .replace(/\.lock$/i, '')
     .slice(0, 60);
+  // Until nothing is left to take off: cutting the name short, or taking `.lock` off, may leave another.
+  for (let before = ''; before !== slug; ) {
+    before = slug;
+    slug = slug.replace(/^[.-]+|[.-]+$/g, '').replace(/\.lock$/i, '');
+  }
   return slug || 'repo';
 }
 

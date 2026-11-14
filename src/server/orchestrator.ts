@@ -1377,7 +1377,8 @@ export class Orchestrator {
   /** An agent's request for a folder, as the chat shows it until the user answers. */
   private folderRequest(conv: Conversation, ask: FolderAsk): Extract<MessagePart, { type: 'folder' }> {
     // As the agent wrote it: `~` is the home folder, a relative path is from where it runs.
-    const path = /^~($|[\\/])/.test(ask.path) || isAbsolute(ask.path) ? expandPath(ask.path) : resolve(conv.settings.cwd, ask.path);
+    // Links resolved, as allowing it does: the card names the folder the copy would be made of.
+    const path = realOr(/^~($|[\\/])/.test(ask.path) || isAbsolute(ask.path) ? expandPath(ask.path) : resolve(conv.settings.cwd, ask.path));
     const { drops } = this.folderPlan(conv, path, ask.edit);
     return { type: 'folder', path, ...(ask.edit ? { edit: true } : {}), ...(drops.length ? { drops } : {}), status: 'pending' };
   }
@@ -1499,6 +1500,21 @@ export class Orchestrator {
     if (kept.length) next.copies = kept;
     else delete next.copies;
     const gone = this.ownCopies(conv, copies).filter((c) => !kept.some((k) => k.tree === c.tree));
+    // First the agents' own worktrees of a copy that goes (parallel mode), with their branches, as
+    // when the conversation is deleted: once the copy's folder is gone git could no longer be asked
+    // to remove them, and they would keep their branches in the user's repository.
+    const trees = new Set(gone.map((c) => realOr(c.tree)));
+    for (const [agentId, list] of Object.entries(conv.worktrees)) {
+      const mine = list.filter((w) => trees.has(realOr(w.root)));
+      if (!mine.length) continue;
+      for (const wt of mine) {
+        await removeWorktree(wt.root, wt.path, wt.branch).catch((err) =>
+          console.warn('[orchestrator] worktree cleanup failed:', (err as Error).message),
+        );
+        this.store.deleteWorktree(conv.id, agentId, wt.root);
+      }
+      conv.worktrees[agentId] = list.filter((w) => !mine.includes(w));
+    }
     await this.commitLeft(conv, gone);
     for (const tree of new Set(gone.map((c) => c.tree))) {
       await removeWorktree(gone.find((c) => c.tree === tree)!.root, tree).catch((err) =>

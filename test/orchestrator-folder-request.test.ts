@@ -6,7 +6,7 @@
  * The fake CLI, and what each test starts with, are in ./orchestrator-harness.ts.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { cwdsOf, type Conversation, type MessagePart } from '../src/shared/types';
@@ -319,6 +319,50 @@ describe('an agent asks for a folder', () => {
     expect(git(other, 'show', `${copy!.branch}:Alice.txt`)).toBe('Alice was here');
     expect(git(other, 'log', '--format=%s', copy!.branch).split('\n')).toEqual(['Harness Relay: test', 'first']);
     expect(existsSync(join(other, 'Alice.txt'))).toBe(false);
+  });
+
+  it('in parallel mode takes the agents\' worktrees of a copy away with it, so the repository can be asked for again', async () => {
+    const other = otherRepo();
+    const conv = conversation({ mode: 'parallel', permission: 'read-only' });
+    fake.folderAsk = { Alice: `[ASK_FOLDER ${other} edit]` };
+    await orchestrator.send(conv.id, 'go');
+    await finish(conv.id);
+    await orchestrator.answerFolder(conv.id, asking(conv).id, { allow: true });
+    await finish(conv.id);
+    const [copy] = conv.settings.copies!;
+    expect(git(other, 'worktree', 'list').split('\n')).toHaveLength(4); // its own, the copy, Alice's, Bob's
+
+    // The user takes the copy out of the working directories.
+    const next = { ...conv.settings, cwd: project };
+    delete next.extraCwds;
+    await orchestrator.retainCopies(conv, next);
+    conv.settings = next;
+    expect(git(other, 'worktree', 'list').split('\n')).toHaveLength(1);
+    expect(git(other, 'branch', '--format=%(refname:short)').split('\n').sort()).toEqual([git(other, 'rev-parse', '--abbrev-ref', 'HEAD'), copy!.branch].sort());
+    expect(Object.values(conv.worktrees).flat().some((w) => w.root === copy!.tree)).toBe(false);
+
+    // Asked for again and allowed: the runs go through.
+    fake.folderAsk = { Alice: `[ASK_FOLDER ${other} edit]` };
+    await orchestrator.send(conv.id, 'again');
+    await finish(conv.id);
+    await orchestrator.answerFolder(conv.id, conv.messages.findLast((m) => m.parts.some((p) => p.type === 'folder'))!.id, { allow: true });
+    await finish(conv.id);
+    expect(agentMessages(conv).at(-1)).toMatchObject({ status: 'done' });
+    expect(systemNotes(conv).some((t) => t.includes('cannot force update'))).toBe(false);
+    await orchestrator.deleteConversation(conv.id);
+    expect(git(other, 'worktree', 'list').split('\n')).toHaveLength(1);
+    expect(git(other, 'branch', '--list', `relay/${conv.id.slice(0, 8)}/*`)).toBe('');
+  });
+
+  // Making a link needs a privilege on Windows.
+  it.skipIf(process.platform === 'win32')('names the folder a link leads to on the card, as the copy is made of it', async () => {
+    const other = otherRepo();
+    symlinkSync(other, join(project, 'vendor-link'));
+    const conv = conversation({ mode: 'roundtable', permission: 'read-only' });
+    fake.folderAsk = { Alice: '[ASK_FOLDER vendor-link]' };
+    await orchestrator.send(conv.id, 'go');
+    await finish(conv.id);
+    expect(folderPart(conv)).toMatchObject({ path: other });
   });
 
   it('commits what is in a copy and not on its branch yet before removing it', async () => {

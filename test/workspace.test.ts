@@ -238,6 +238,11 @@ describe("a copy of a repository an agent asked for", () => {
     expect(branchSlug('..hidden..')).toBe('hidden');
     expect(branchSlug('repo.lock')).toBe('repo');
     expect(branchSlug('a..b')).toBe('a.b');
+    expect(branchSlug('foo.lock.lock')).toBe('foo');
+    expect(branchSlug(`${'x'.repeat(59)}.y`)).toBe('x'.repeat(59));
+    for (const name of ['foo.lock.lock', `${'x'.repeat(59)}.y`, 'My Project (v2)', '-a.lock.']) {
+      expect(() => git(repo, 'check-ref-format', `refs/heads/relay/c-copy/${branchSlug(name)}`)).not.toThrow();
+    }
     expect(branchSlug('專案')).toBe('repo');
     expect(branchSlug('')).toBe('repo');
   });
